@@ -53,7 +53,9 @@ impl ArtifactDiff {
     }
 }
 
-/// A Verus proof result attached to an artifact, recording which properties were verified.
+/// A provenance commitment attached to an artifact. This legacy type records
+/// claimed properties but does not establish them; use `ProofVerification` for
+/// checker-backed semantic verification.
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct ProofAttachment {
     pub artifact_name: String,

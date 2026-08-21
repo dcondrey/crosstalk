@@ -3,7 +3,7 @@ name = "crosstalk-eval"
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.91"
-description = "Benchmarking harness for Crosstalk UCB1 topology selection (arXiv companion)"
+description = "Fail-closed evaluation harness for Crosstalk simulations and live SWE-bench runs"
 authors = ["David Condrey <david@writerslogic.com>"]
 license = "Apache-2.0"
 

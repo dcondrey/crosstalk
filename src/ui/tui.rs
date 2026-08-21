@@ -189,16 +189,16 @@ impl CrosstalkUI {
                                 );
                             }
                         }
-                        KeyCode::Right | KeyCode::Char('.') => {
-                            if self.playback_index < sigma.iteration_index {
-                                self.playback_index += 1;
-                                crate::log_warn!(
-                                    self.control_tx
-                                        .send(ControlSignal::Rewind(self.playback_index))
-                                        .await,
-                                    "failed to send rewind signal"
-                                );
-                            }
+                        KeyCode::Right | KeyCode::Char('.')
+                            if self.playback_index < sigma.iteration_index =>
+                        {
+                            self.playback_index += 1;
+                            crate::log_warn!(
+                                self.control_tx
+                                    .send(ControlSignal::Rewind(self.playback_index))
+                                    .await,
+                                "failed to send rewind signal"
+                            );
                         }
                         _ => {}
                     },

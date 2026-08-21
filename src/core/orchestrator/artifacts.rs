@@ -1117,12 +1117,16 @@ impl Orchestrator {
             }
         }
 
-        let verification_results = if !io_artifacts.is_empty() {
+        let verification_batch = if !io_artifacts.is_empty() {
             self.run_verification(&all_artifacts, &turn_diffs).await
         } else {
-            vec![]
+            super::verification::VerificationBatch {
+                display: vec![],
+                records: vec![],
+            }
         };
-        for (tool_name, output, passed) in &verification_results {
+        let verification_results = &verification_batch.display;
+        for (tool_name, output, passed) in verification_results {
             let status = if *passed { "PASS" } else { "FAIL" };
             self.emit(StreamEvent::TokenReceived {
                 agent_id: "System".to_string(),
@@ -1148,6 +1152,13 @@ impl Orchestrator {
             .iter()
             .map(|(name, output, passed)| (name.clone(), output.clone(), *passed))
             .collect();
+        for record in verification_batch.records {
+            if !sigma.investigation.verifications.contains_key(&record.id)
+                && let Err(error) = sigma.investigation.record_verification(record)
+            {
+                tracing::warn!(%error, "failed to persist typed verification record");
+            }
+        }
         {
             let intell = self.intelligence.lock().await;
             intell.update_profile_with_latency(&turn, quality_score, latency_ms);

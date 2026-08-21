@@ -909,7 +909,7 @@ impl SynthesisEngine {
 
         // Sort by frequency descending (sentences appearing in more proposals come first).
         // Within the same frequency, preserve original insertion order (stable sort).
-        sentence_freq.sort_by(|a, b| b.1.cmp(&a.1));
+        sentence_freq.sort_by_key(|item| std::cmp::Reverse(item.1));
 
         // Include sentences that appear in at least one proposal (all of them),
         // but prioritize consensus ones. Single-appearance sentences from a single

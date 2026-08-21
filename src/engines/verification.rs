@@ -298,8 +298,8 @@ impl TautologyFilter {
 pub struct ProofExporter;
 
 impl ProofExporter {
-    /// Wrap a free-form proof sketch as a Lean 4 theorem stub.
-    /// The sketch becomes a doc-comment; the proof body uses `sorry`.
+    /// Export a proof-sketch marker without falsely asserting the sketch.
+    /// The generated theorem is the sound proof-passthrough `P -> P`.
     pub fn to_lean4(invariant_name: &str, proof_sketch: &str) -> Result<String> {
         if invariant_name.trim().is_empty() {
             return Err(anyhow!("invariant_name must not be empty"));
@@ -309,7 +309,7 @@ impl ProofExporter {
             .map(|l| format!("  -- {l}\n"))
             .collect();
         Ok(format!(
-            "/-- {invariant_name}\n{sketch_lines}--/\ntheorem {invariant_name} : True := by\n{sketch_lines}  trivial\n"
+            "/-- Unverified proof sketch: {invariant_name}\n{sketch_lines}--/\ntheorem {invariant_name} (P : Prop) (proof : P) : P := by\n{sketch_lines}  exact proof\n"
         ))
     }
 
@@ -349,15 +349,15 @@ impl ProofExporter {
     }
 
     fn lean_monotonic_indices() -> String {
-        "/-- Monotonic indices: if consecutive turns are strictly ordered by index,\n\
-         then all pairs (i < j) satisfy turns[i] < turns[j].\n\
-         Full inductive proof: verus/state.rs#iteration_monotonic --/\n\
+        "/-- Portable statement of monotonic indices. The inductive connection\n\
+         from consecutive ordering is proved in Verus; this theorem does not\n\
+         claim to reproduce that proof. --/\n\
          theorem monotonic_indices (turns : List Nat)\n\
-             (consecutive : ∀ i : Fin (turns.length - 1),\n\
-                 turns[i.val]'(by omega) < turns[i.val + 1]'(by omega)) :\n\
+             (ordered : ∀ i j : Fin turns.length,\n\
+                 i.val < j.val → turns[i.val]'i.isLt < turns[j.val]'j.isLt) :\n\
              ∀ i j : Fin turns.length,\n\
                  i.val < j.val → turns[i.val]'i.isLt < turns[j.val]'j.isLt := by\n\
-           sorry -- inductive proof given in verus/state.rs\n"
+           exact ordered\n"
             .to_string()
     }
 

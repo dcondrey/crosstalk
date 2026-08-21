@@ -21,18 +21,25 @@ use futures::future::join_all;
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 use std::io;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::Mutex;
 use tokio::sync::mpsc;
 
-use clap::Parser;
+use clap::{Parser, ValueEnum};
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum HeadlessFormat {
+    Json,
+    Markdown,
+}
 
 #[derive(Parser)]
 #[command(
     name = "Crosstalk",
-    version = "1.0.5",
-    about = "AI Multi-Model Mediator"
+    version,
+    about = "Domain-general multi-model reasoning and verification orchestrator"
 )]
 struct Args {
     #[arg(short, long)]
@@ -67,6 +74,54 @@ struct Args {
     /// Resume a prior session by its session ID (restores the latest checkpoint).
     #[arg(long)]
     resume: Option<String>,
+
+    /// Search arXiv and attach provenance-rich records before deliberation.
+    #[arg(long, value_name = "QUERY")]
+    arxiv: Option<String>,
+
+    /// Search Zenodo and attach provenance-rich records before deliberation.
+    #[arg(long, value_name = "QUERY")]
+    zenodo: Option<String>,
+
+    /// Maximum records per research repository query (capped at 25).
+    #[arg(long, default_value_t = 10)]
+    research_limit: usize,
+
+    /// Run the native BlindMind evolution engine for this many generations before deliberation.
+    #[arg(long, default_value_t = 0, value_name = "N")]
+    evolve_generations: usize,
+
+    /// Candidate population requested from each native evolution generation.
+    #[arg(long, default_value_t = 8, value_name = "N")]
+    evolve_population: usize,
+
+    /// Deterministic seed for native evolutionary discovery.
+    #[arg(long, default_value_t = 1)]
+    evolve_seed: u64,
+
+    /// Maximum native evolution candidates evaluated concurrently.
+    #[arg(long, default_value_t = 4, value_name = "N")]
+    evolve_concurrency: usize,
+
+    /// Wall-clock limit for the complete native evolution stage.
+    #[arg(long, default_value_t = 900, value_name = "SECONDS")]
+    evolve_timeout_secs: u64,
+
+    /// Run without a terminal UI and write the final result to stdout.
+    #[arg(long, default_value_t = false)]
+    headless: bool,
+
+    /// Serialization used for the final headless result.
+    #[arg(long, value_enum, default_value_t = HeadlessFormat::Json)]
+    headless_format: HeadlessFormat,
+
+    /// Export a reproducible investigation bundle to this directory.
+    #[arg(long, value_name = "DIR")]
+    bundle_dir: Option<PathBuf>,
+
+    /// Verify an exported investigation bundle and exit without starting models.
+    #[arg(long, value_name = "DIR")]
+    verify_bundle: Option<PathBuf>,
 }
 
 fn lang_from_ext(path: &str) -> String {
@@ -83,6 +138,8 @@ fn lang_from_ext(path: &str) -> String {
         "html" => "html",
         "css" => "css",
         "sql" => "sql",
+        "lean" => "lean4",
+        "v" => "coq",
         "go" => "go",
         "java" => "java",
         "c" | "h" => "c",
@@ -143,6 +200,8 @@ fn is_likely_text(path: &std::path::Path) -> bool {
             | "html"
             | "css"
             | "sql"
+            | "lean"
+            | "v"
             | "go"
             | "java"
             | "c"
@@ -245,26 +304,31 @@ async fn run_orchestrator_loop(
     cancel: CancelScope,
 ) {
     let mut i = 0u32;
+    let mut consecutive_failures = 0u32;
     loop {
         if cancel.is_cancelled() || app.lock().await.shutdown {
             break;
         }
         let sigma_in = Arc::clone(&sigma);
         let omicron_in = Arc::clone(&omicron);
-        let join = tokio::task::spawn(async move { omicron_in.run_turn(sigma_in).await });
-        let res = match tokio::time::timeout(turn_timeout, join).await {
+        let mut join = tokio::task::spawn(async move { omicron_in.run_turn(sigma_in).await });
+        let res = match tokio::time::timeout(turn_timeout, &mut join).await {
             Err(_elapsed) => {
+                join.abort();
+                let _ = join.await;
+                i += 1;
+                consecutive_failures += 1;
                 let mut a = app.lock().await;
                 a.push_event(format!(
                     "Turn {} timed out after {}s",
-                    i + 1,
+                    i,
                     turn_timeout.as_secs()
                 ));
                 drop(a);
-                tokio::time::sleep(Duration::from_secs(2)).await;
-                if iterations > 0 && i >= iterations {
+                if (iterations > 0 && i >= iterations) || consecutive_failures >= 3 {
                     break;
                 }
+                tokio::time::sleep(Duration::from_secs(2)).await;
                 continue;
             }
             Ok(r) => r,
@@ -273,6 +337,7 @@ async fn run_orchestrator_loop(
         match res {
             Ok(Ok(optimal)) => {
                 i += 1;
+                consecutive_failures = 0;
                 if optimal {
                     let mut a = app.lock().await;
                     a.push_event(format!("Converged after {} turn(s)", i));
@@ -296,13 +361,15 @@ async fn run_orchestrator_loop(
                 .await;
             }
             Ok(Err(e)) => {
+                i += 1;
+                consecutive_failures += 1;
                 let mut app_err = app.lock().await;
-                app_err.push_event(format!("Turn {} error: {}", i + 1, e));
+                app_err.push_event(format!("Turn {} error: {}", i, e));
                 drop(app_err);
-                tokio::time::sleep(Duration::from_secs(2)).await;
-                if iterations > 0 && i >= iterations {
+                if (iterations > 0 && i >= iterations) || consecutive_failures >= 3 {
                     break;
                 }
+                tokio::time::sleep(Duration::from_secs(2)).await;
             }
             Err(e) => {
                 let mut app_err = app.lock().await;
@@ -320,19 +387,21 @@ async fn run_orchestrator_loop(
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    // Load ~/.env then .env (project-local), silently ignoring missing files.
-    if let Ok(home) = std::env::var("HOME") {
-        let _ = dotenv::from_path(std::path::Path::new(&home).join(".env"));
-    }
-    let _ = dotenv::dotenv();
-
-    // 0. Initialize structured logging -- rotate, keeping last 5 logs
-    let (_guard, run_log, run_ts) = init_logging()?;
-
-    tracing::info!("crosstalk session starting");
-
-    // 1. Parse CLI args (env already loaded above)
+    // Parse before initializing logging so --help, --version, and shell
+    // completions are side-effect free and work in read-only environments.
     let args = Args::parse();
+
+    if let Some(bundle_dir) = &args.verify_bundle {
+        let verification =
+            crosstalk::engines::investigation_bundle::InvestigationBundleExporter::verify(
+                bundle_dir,
+            )?;
+        println!("{}", serde_json::to_string_pretty(&verification)?);
+        if !verification.passed {
+            anyhow::bail!("investigation bundle verification failed");
+        }
+        return Ok(());
+    }
 
     if !args.generate_completions.is_empty() {
         use clap::CommandFactory;
@@ -349,8 +418,30 @@ async fn main() -> anyhow::Result<()> {
         return Ok(());
     }
 
+    if args.headless && args.task.is_none() {
+        anyhow::bail!("--headless requires --task so the run is non-interactive");
+    }
+
+    // Online runs load ~/.env then project-local .env after all offline command
+    // paths have returned. This keeps help, completions, and bundle verification
+    // from touching credential files.
+    if let Ok(home) = std::env::var("HOME") {
+        let _ = dotenv::from_path(std::path::Path::new(&home).join(".env"));
+    }
+    let _ = dotenv::dotenv();
+
+    // 0. Initialize structured logging -- rotate, keeping last 5 logs
+    let (_guard, run_log, run_ts) = init_logging()?;
+
+    tracing::info!("crosstalk session starting");
+
     // First-run: if no API keys are configured, launch the setup wizard.
     if !model_select::has_any_api_key() && args.models.is_empty() {
+        if args.headless {
+            anyhow::bail!(
+                "headless mode requires a configured provider API key or explicit model credentials"
+            );
+        }
         model_select::run_api_key_setup().await?;
     }
 
@@ -611,6 +702,193 @@ async fn main() -> anyhow::Result<()> {
         drop(s);
     }
 
+    // Repository records become immutable, provenance-rich artifacts in the
+    // same context path as local evidence. A failed repository must not erase
+    // results from another source or prevent an offline session from running.
+    let research_queries = [
+        (
+            crosstalk::engines::research::ResearchRepository::Arxiv,
+            args.arxiv.as_ref(),
+        ),
+        (
+            crosstalk::engines::research::ResearchRepository::Zenodo,
+            args.zenodo.as_ref(),
+        ),
+    ];
+    if research_queries.iter().any(|(_, query)| query.is_some()) {
+        let research_client = crosstalk::engines::research::ResearchClient::new(
+            std::env::var("ZENODO_ACCESS_TOKEN").ok(),
+        )?;
+        for (repository, query) in research_queries {
+            let Some(query) = query else { continue };
+            match research_client
+                .search(repository, query, args.research_limit)
+                .await
+            {
+                Ok(records) => {
+                    let name = match repository {
+                        crosstalk::engines::research::ResearchRepository::Arxiv => {
+                            "research/arxiv.json"
+                        }
+                        crosstalk::engines::research::ResearchRepository::Zenodo => {
+                            "research/zenodo.json"
+                        }
+                    };
+                    let content = serde_json::to_string_pretty(&records)?;
+                    let mut state = sigma.lock().await;
+                    for record in &records {
+                        use sha2::{Digest, Sha256};
+                        let evidence_id =
+                            format!("research:{:?}:{}", record.repository, record.identifier)
+                                .to_ascii_lowercase();
+                        if state.investigation.evidence.contains_key(&evidence_id) {
+                            continue;
+                        }
+                        let record_bytes = serde_json::to_vec(record)?;
+                        let mut metadata = std::collections::BTreeMap::new();
+                        metadata.insert(
+                            "repository_response_sha256".into(),
+                            record.response_sha256.clone(),
+                        );
+                        metadata.insert("authors".into(), record.authors.join("; "));
+                        if let Some(published) = &record.published {
+                            metadata.insert("published".into(), published.clone());
+                        }
+                        if let Some(doi) = &record.doi {
+                            metadata.insert("doi".into(), doi.clone());
+                        }
+                        if let Err(error) = state.investigation.register_evidence(
+                            crosstalk::types::investigation::EvidenceArtifact {
+                                id: evidence_id,
+                                kind: crosstalk::types::investigation::EvidenceKind::SourceRecord,
+                                title: record.title.clone(),
+                                content_sha256: format!("{:x}", Sha256::digest(&record_bytes)),
+                                media_type: "application/json".into(),
+                                source_uri: Some(record.canonical_url.clone()),
+                                locator: None,
+                                artifact_name: Some(name.into()),
+                                verification_id: None,
+                                captured_at: record.retrieved_at,
+                                independent: false,
+                                metadata,
+                            },
+                        ) {
+                            tracing::warn!(%error, "failed to register research evidence");
+                        }
+                    }
+                    state.ingest_file(name.to_string(), "json".to_string(), content);
+                    tracing::info!(
+                        ?repository,
+                        records = records.len(),
+                        "research records attached"
+                    );
+                }
+                Err(error) => {
+                    tracing::warn!(?repository, %error, "research repository query failed")
+                }
+            }
+        }
+    }
+
+    if args.evolve_generations > 0 {
+        print_status(&format!(
+            "Running {} native evolution generation(s)...",
+            args.evolve_generations
+        ));
+        let mut request = crosstalk::engines::idea_evolution::EvolutionRequest::new(
+            &session_id,
+            &task_str,
+            vec![crosstalk::engines::idea_evolution::IdeaSeed {
+                id: "user-problem-seed".into(),
+                domain: "Cross-domain".into(),
+                title: task_str.chars().take(160).collect(),
+                mechanism:
+                    "Initial user problem framing; evolve concrete mechanisms from this seed".into(),
+            }],
+        );
+        request.population_size = args.evolve_population;
+        request.generations = args.evolve_generations;
+        request.max_concurrency = args.evolve_concurrency;
+        {
+            use sha2::{Digest, Sha256};
+            let state = sigma.lock().await;
+            request.evidence_ids = state.artifacts.keys().cloned().collect();
+            request.evidence_context = state
+                .artifacts
+                .iter()
+                .take(32)
+                .map(|(id, artifact)| {
+                    let end = artifact
+                        .content
+                        .floor_char_boundary(artifact.content.len().min(8_000));
+                    let sanitized = crosstalk::engines::security::InjectionShield::sanitize(
+                        &artifact.content[..end],
+                    );
+                    let sanitized_end = sanitized.floor_char_boundary(sanitized.len().min(8_000));
+                    let excerpt = sanitized[..sanitized_end].to_string();
+                    crosstalk::engines::idea_evolution::EvidenceExcerpt {
+                        id: id.clone(),
+                        content_sha256: format!(
+                            "{:x}",
+                            Sha256::digest(artifact.content.as_bytes())
+                        ),
+                        excerpt,
+                    }
+                })
+                .collect();
+        }
+        let variation_agent = agents[0].as_ref();
+        let critic_agent = agents
+            .get(1)
+            .map_or(variation_agent, |agent| agent.as_ref());
+        let evolution = tokio::time::timeout(
+            Duration::from_secs(args.evolve_timeout_secs.max(1)),
+            crosstalk::engines::idea_evolution::run_native_evolution_with_agents(
+                variation_agent,
+                critic_agent,
+                &request,
+                args.evolve_seed,
+            ),
+        )
+        .await;
+        match evolution {
+            Ok(Ok(outcome)) => {
+                outcome.response.validate().map_err(anyhow::Error::msg)?;
+                let candidates = serde_json::to_string_pretty(&outcome.response)?;
+                let reports = serde_json::to_string_pretty(&outcome.reports)?;
+                let mut state = sigma.lock().await;
+                state.ingest_file(
+                    "evolution/native-candidates.json".into(),
+                    "json".into(),
+                    candidates,
+                );
+                state.ingest_file(
+                    "evolution/checkpoint.json".into(),
+                    "json".into(),
+                    outcome.checkpoint_json,
+                );
+                state.ingest_file(
+                    "evolution/generation-reports.json".into(),
+                    "json".into(),
+                    reports,
+                );
+                tracing::info!(
+                    ideas = outcome.response.ideas.len(),
+                    variation_agent = variation_agent.name(),
+                    critic_agent = critic_agent.name(),
+                    "native evolution completed"
+                );
+            }
+            Ok(Err(error)) => {
+                tracing::warn!(%error, "native evolution failed; continuing without candidates")
+            }
+            Err(_) => tracing::warn!(
+                timeout_secs = args.evolve_timeout_secs,
+                "native evolution timed out; continuing without candidates"
+            ),
+        }
+    }
+
     let (event_tx, event_rx) = mpsc::channel::<StreamEvent>(1000);
     let (control_tx, control_rx) = mpsc::channel::<ControlSignal>(100);
 
@@ -627,6 +905,16 @@ async fn main() -> anyhow::Result<()> {
         };
 
     let task = task_str;
+    {
+        let mut state = sigma.lock().await;
+        if state.investigation.id.is_empty() {
+            state.investigation.id = session_id.clone();
+        }
+        if state.investigation.problem.statement.trim().is_empty() {
+            state.investigation.problem.statement = task.clone();
+            state.investigation.updated_at = ConversationState::now();
+        }
+    }
     let task_content = {
         let s = sigma.lock().await;
         if s.artifacts.is_empty() {
@@ -704,12 +992,15 @@ async fn main() -> anyhow::Result<()> {
 
     // 6. Set panic hook before spawning any tasks
     let prev_hook = std::panic::take_hook();
+    let restore_terminal_on_panic = !args.headless;
     std::panic::set_hook(Box::new(move |info| {
-        log_warn!(disable_raw_mode(), "Failed to disable raw mode");
-        log_warn!(
-            io::stdout().execute(LeaveAlternateScreen),
-            "Failed to leave alternate screen"
-        );
+        if restore_terminal_on_panic {
+            log_warn!(disable_raw_mode(), "Failed to disable raw mode");
+            log_warn!(
+                io::stdout().execute(LeaveAlternateScreen),
+                "Failed to leave alternate screen"
+            );
+        }
         prev_hook(info);
     }));
 
@@ -758,68 +1049,92 @@ async fn main() -> anyhow::Result<()> {
         });
     }
 
-    // 8. Initialize TUI
-    print_status("Launching TUI...\n");
-    enable_raw_mode()?;
-    io::stdout().execute(MoveTo(0, 0))?;
-    io::stdout().execute(EnterAlternateScreen)?;
-    let mut terminal = Terminal::new(CrosstermBackend::new(io::stdout()))?;
-    terminal.clear()?;
-
-    // 9. Main loop: drain events, handle keys, render
-    loop {
-        let action = {
-            let mut a = app.lock().await;
-            ui_events::drain_stream_events(&mut a, &mut event_rx);
-            if a.shutdown {
-                break;
+    if args.headless {
+        print_status("Running headless orchestration...\n");
+        loop {
+            {
+                let mut current = app.lock().await;
+                ui_events::drain_stream_events(&mut current, &mut event_rx);
+                if current.shutdown {
+                    break;
+                }
             }
+            tokio::select! {
+                _ = tokio::time::sleep(Duration::from_millis(25)) => {}
+                signal = tokio::signal::ctrl_c() => {
+                    if let Err(error) = signal {
+                        tracing::warn!(%error, "failed to listen for Ctrl-C");
+                    }
+                    let _ = ctrl_tx.send(ControlSignal::Shutdown).await;
+                    app.lock().await.shutdown = true;
+                    break;
+                }
+            }
+        }
+    } else {
+        // 8. Initialize TUI
+        print_status("Launching TUI...\n");
+        enable_raw_mode()?;
+        io::stdout().execute(MoveTo(0, 0))?;
+        io::stdout().execute(EnterAlternateScreen)?;
+        let mut terminal = Terminal::new(CrosstermBackend::new(io::stdout()))?;
+        terminal.clear()?;
 
-            let action = match ui_events::poll_key(Duration::from_millis(16)) {
-                Some(key) => ui_events::handle_key(&mut a, key),
-                None => Action::None,
+        // 9. Main loop: drain events, handle keys, render
+        loop {
+            let action = {
+                let mut a = app.lock().await;
+                ui_events::drain_stream_events(&mut a, &mut event_rx);
+                if a.shutdown {
+                    break;
+                }
+
+                let action = match ui_events::poll_key(Duration::from_millis(16)) {
+                    Some(key) => ui_events::handle_key(&mut a, key),
+                    None => Action::None,
+                };
+
+                a.tick_fps();
+                action
             };
 
-            a.tick_fps();
-            action
-        };
-
-        {
-            let a = app.lock().await;
-            if a.shutdown {
-                break;
-            }
-            terminal.draw(|f| render::draw(f, &a))?;
-        }
-
-        match action {
-            Action::Shutdown => {
-                if ctrl_tx.send(ControlSignal::Shutdown).await.is_err() {
-                    tracing::warn!("failed to send shutdown signal; forcing shutdown flag");
-                    app.lock().await.shutdown = true;
-                }
-                break;
-            }
-            Action::Send(sig) => {
-                if ctrl_tx.send(sig).await.is_err() {
-                    tracing::warn!("failed to send control signal; shutting down");
-                    app.lock().await.shutdown = true;
+            {
+                let a = app.lock().await;
+                if a.shutdown {
                     break;
                 }
+                terminal.draw(|f| render::draw(f, &a))?;
             }
-            Action::SendTwo(s1, s2) => {
-                if ctrl_tx.send(s1).await.is_err() || ctrl_tx.send(s2).await.is_err() {
-                    tracing::warn!("failed to send control signal; shutting down");
-                    app.lock().await.shutdown = true;
+
+            match action {
+                Action::Shutdown => {
+                    if ctrl_tx.send(ControlSignal::Shutdown).await.is_err() {
+                        tracing::warn!("failed to send shutdown signal; forcing shutdown flag");
+                        app.lock().await.shutdown = true;
+                    }
                     break;
                 }
+                Action::Send(sig) => {
+                    if ctrl_tx.send(sig).await.is_err() {
+                        tracing::warn!("failed to send control signal; shutting down");
+                        app.lock().await.shutdown = true;
+                        break;
+                    }
+                }
+                Action::SendTwo(s1, s2) => {
+                    if ctrl_tx.send(s1).await.is_err() || ctrl_tx.send(s2).await.is_err() {
+                        tracing::warn!("failed to send control signal; shutting down");
+                        app.lock().await.shutdown = true;
+                        break;
+                    }
+                }
+                Action::None => {}
             }
-            Action::None => {}
         }
+
+        disable_raw_mode()?;
+        io::stdout().execute(LeaveAlternateScreen)?;
     }
-
-    disable_raw_mode()?;
-    io::stdout().execute(LeaveAlternateScreen)?;
 
     // Drain the background orchestrator loop before finalizing so no turn is
     // mid-write. Bounded so shutdown can never hang on an in-flight turn.
@@ -881,6 +1196,67 @@ async fn main() -> anyhow::Result<()> {
             }
         }
         drop(s);
+    }
+
+    if let Some(output_dir) = &args.bundle_dir {
+        let state = sigma.lock().await;
+        let manifest =
+            crosstalk::engines::investigation_bundle::InvestigationBundleExporter::export(
+                &state,
+                output_dir,
+                crosstalk::engines::investigation_bundle::BundleOptions::default(),
+            )?;
+        eprintln!(
+            "Investigation bundle: {} (audit={}, files={})",
+            output_dir.display(),
+            if manifest.audit.passed {
+                "PASS"
+            } else {
+                "FAIL"
+            },
+            manifest.files.len()
+        );
+    }
+
+    if args.headless {
+        let state = sigma.lock().await;
+        let audit = state.investigation.audit(&state.claim_ledger);
+        let final_response = state
+            .turns
+            .iter()
+            .rev()
+            .find(|turn| turn.model_id != "User")
+            .map(|turn| turn.content.as_str())
+            .unwrap_or("");
+        match args.headless_format {
+            HeadlessFormat::Json => {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&serde_json::json!({
+                        "schema": "crosstalk.headless.v1",
+                        "session_id": state.session_id,
+                        "final_response": final_response,
+                        "completion_probability": state.completion_probability,
+                        "chain_head": state.chain_head_hex(),
+                        "audit": audit,
+                        "artifact_names": state.artifacts.keys().collect::<Vec<_>>(),
+                    }))?
+                );
+            }
+            HeadlessFormat::Markdown => {
+                println!("# Crosstalk result\n");
+                println!("- Session: `{}`", state.session_id);
+                println!(
+                    "- Evidence-chain audit: **{}**",
+                    if audit.passed { "PASS" } else { "FAIL" }
+                );
+                println!(
+                    "- Verification coverage: {:.1}%\n",
+                    audit.verification_coverage * 100.0
+                );
+                println!("## Result\n\n{final_response}");
+            }
+        }
     }
 
     // Print session summary

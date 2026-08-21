@@ -102,6 +102,16 @@ fn tampering_a_turn_breaks_the_chain() {
 }
 
 #[test]
+fn tampering_the_first_turn_breaks_the_chain() {
+    let mut s = ConversationState::new("chain");
+    for i in 0..3 {
+        s.push_turn(mk_turn(i, &format!("turn {i}")));
+    }
+    s.turns[0].content = "tampered first turn".to_string();
+    assert_eq!(s.verify_chain(), Some(0));
+}
+
+#[test]
 fn reordering_turns_breaks_the_chain() {
     let mut s = ConversationState::new("chain");
     for i in 0..3 {
@@ -122,14 +132,14 @@ fn deleting_a_turn_is_detected_as_count_divergence() {
 }
 
 #[test]
-fn legacy_state_without_chain_verifies_as_intact() {
+fn state_with_turns_but_no_chain_fails_closed() {
     let mut s = ConversationState::new("chain");
     for i in 0..3 {
         s.push_turn(mk_turn(i, &format!("turn {i}")));
     }
-    // Simulate a state persisted before the chain existed.
+    // Removing the chain must not downgrade the state into a trusted legacy mode.
     s.turn_hashes.clear();
-    assert_eq!(s.verify_chain(), None);
+    assert_eq!(s.verify_chain(), Some(0));
 }
 
 #[test]
@@ -140,5 +150,9 @@ fn chain_stays_aligned_and_consistent_after_drain() {
     }
     assert_eq!(s.turns.len(), 200);
     assert_eq!(s.turn_hashes.len(), 200);
+    assert!(s.turn_chain_base.is_some());
     assert_eq!(s.verify_chain(), None);
+
+    s.turns[0].content = "tampered retained anchor".into();
+    assert_eq!(s.verify_chain(), Some(0));
 }

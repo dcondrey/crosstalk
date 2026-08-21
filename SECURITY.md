@@ -71,6 +71,27 @@ Candidate changes are executed in a WASM sandbox (wasmtime) with a CPU-fuel
 budget, an epoch-deadline interrupt, a memory cap, and a wall-clock timeout;
 resource-limit kills are distinguished from ordinary failures.
 
+### External proof checkers
+
+Lean, Verus, and Coq artifacts are checked by native child processes in a
+private temporary directory with a cleared environment, source/diagnostic size
+limits, a wall-clock timeout, and no intervening shell. These controls are not
+a complete operating-system sandbox. Pin checker versions, review generated
+imports and trusted axioms, and use a networkless OS/container sandbox for
+high-risk proof source. See [Formal Verification](docs/formal-verification.md).
+
+### Research and model-provider data flow
+
+arXiv and Zenodo metadata is untrusted input. Bounded excerpts supplied to
+native evolution are screened for known prompt-injection patterns, but no text
+filter is complete. Treat retrieved content as quoted evidence rather than
+instructions.
+
+Task text, selected local files, retrieved records, and generated evidence
+excerpts may be sent to the configured model providers. Do not attach secrets
+or regulated data unless each provider and the deployment's retention policy
+are approved for that information.
+
 ### Cryptographic Primitives
 
 - Signing: ed25519 (`ed25519-dalek`)
@@ -87,3 +108,7 @@ Key material is held in `Zeroizing` buffers and never logged.
   `CROSSTALK_EXPECTED_PUBKEY` in your environment or CI.
 - Run Crosstalk against a workspace that is a dedicated git checkout so the
   transcript hash-chain anchor lands in a history you control.
+- Run native proof checkers inside a hardened, networkless sandbox when the
+  generated source or its dependencies are not trusted.
+- Use dedicated provider credentials with the minimum practical quota, and
+  review workspace globs before attaching local files.

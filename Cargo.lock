@@ -1788,6 +1788,7 @@ dependencies = [
  "argon2",
  "arrow-array",
  "arrow-schema",
+ "async-trait",
  "bincode",
  "chacha20poly1305",
  "chrono",
@@ -1798,6 +1799,7 @@ dependencies = [
  "criterion",
  "crossbeam",
  "crosstalk-concurrency",
+ "crosstalk-evolution",
  "crossterm",
  "dashmap",
  "dotenv",
@@ -1810,6 +1812,7 @@ dependencies = [
  "lancedb",
  "ort",
  "petgraph",
+ "quick-xml",
  "rand 0.9.4",
  "ratatui",
  "rayon",
@@ -1836,6 +1839,7 @@ dependencies = [
  "tree-sitter-rust",
  "wasmtime",
  "wasmtime-wasi",
+ "wat",
  "which",
  "zeroize",
 ]
@@ -1863,6 +1867,19 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
+]
+
+[[package]]
+name = "crosstalk-evolution"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "futures",
+ "serde",
+ "serde_json",
+ "sha2",
+ "thiserror 2.0.18",
+ "tokio",
 ]
 
 [[package]]

@@ -1,0 +1,32 @@
+[
+  {
+    "name": "novel-unflagged",
+    "novelty": 8.0,
+    "feasibility": 7.0,
+    "utility": 8.0,
+    "semantic_jump": 6.0,
+    "prior_art_overlap": 1.0,
+    "fatal_flaws": [],
+    "expected": 8.15
+  },
+  {
+    "name": "same-candidate-flagged",
+    "novelty": 8.0,
+    "feasibility": 7.0,
+    "utility": 8.0,
+    "semantic_jump": 6.0,
+    "prior_art_overlap": 1.0,
+    "fatal_flaws": ["violates a stated constraint"],
+    "expected": 5.65
+  },
+  {
+    "name": "derivative",
+    "novelty": 8.0,
+    "feasibility": 7.0,
+    "utility": 8.0,
+    "semantic_jump": 6.0,
+    "prior_art_overlap": 9.0,
+    "fatal_flaws": [],
+    "expected": 6.15
+  }
+]

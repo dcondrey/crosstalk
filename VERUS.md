@@ -48,11 +48,15 @@ verus proofs/invariant_checker.rs
 
 A successful run prints `verification results:: N verified, 0 errors` for each file.
 
-## Why proofs are excluded from CI
+## Why proofs are excluded from standard CI
 
 Verus requires a pinned nightly toolchain that diverges from the stable toolchain used for
 the main build.  Installing Verus and Z3 on every CI runner adds several minutes to each
-run and would complicate the matrix (macOS, Linux, Windows).  The proofs are stable — they
-are re-run manually before every release and whenever the proved functions change.  The CI
-pipeline enforces the same safety properties at runtime via the `InvariantChecker` and
-`ContinuousAuditor` engines.
+run and would complicate the matrix (macOS, Linux, Windows). Run these proof commands whenever
+the modeled transitions or their implementation changes and record the Verus/Rust/Z3 versions
+with release evidence.
+
+Runtime checks in `InvariantChecker` and `ContinuousAuditor` cover related failure conditions,
+but runtime tests are not substitutes for Verus proofs. Conversely, the proof files establish
+properties of their encoded models; reviewers must also confirm that those models remain aligned
+with the production implementation.

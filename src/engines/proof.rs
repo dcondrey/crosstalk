@@ -48,8 +48,8 @@ impl ProofManager {
             safe_name
         };
         format!(
-            "-- Proof for {}\ntheorem artifact_{safe_name}_integrity (h : proof_hash = \"{}\") : True := by\n  -- Properties: {}\n  trivial\n",
-            attachment.artifact_name, attachment.proof_hash, props
+            "-- Provenance commitment for {}. This is not a semantic proof.\n-- Claimed properties (unverified here): {}\ndef artifact_{safe_name}_commitment : String := \"{}\"\n",
+            attachment.artifact_name, props, attachment.proof_hash
         )
     }
 }

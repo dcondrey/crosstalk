@@ -1,11 +1,16 @@
 use super::*;
 
+pub(super) struct VerificationBatch {
+    pub display: Vec<(String, String, bool)>,
+    pub records: Vec<crate::types::investigation::VerificationRecord>,
+}
+
 impl Orchestrator {
     pub(super) async fn run_verification(
         &self,
         artifacts: &BTreeMap<String, Arc<Artifact>>,
         diffs: &[(String, crate::types::artifact::ArtifactDiff)],
-    ) -> Vec<(String, String, bool)> {
+    ) -> VerificationBatch {
         let workspace = &self.file_writer.root;
         let modified_names: std::collections::HashSet<&str> =
             diffs.iter().map(|(name, _)| name.as_str()).collect();
@@ -74,11 +79,108 @@ impl Orchestrator {
                 }
             }
         }
-        results
+
+        let proof_verifier = crate::engines::formal_verification::FormalProofVerifier::default();
+        let mut records = Vec::new();
+        for artifact in &modified_artifacts {
+            let backend = match artifact.language.to_ascii_lowercase().as_str() {
+                "lean" | "lean4" => Some(crate::engines::formal_verification::ProofBackend::Lean4),
+                "coq" => Some(crate::engines::formal_verification::ProofBackend::Coq),
+                "verus" => Some(crate::engines::formal_verification::ProofBackend::Verus),
+                _ if artifact.content.contains("verus!") => {
+                    Some(crate::engines::formal_verification::ProofBackend::Verus)
+                }
+                _ => None,
+            };
+            if let Some(backend) = backend {
+                let label = format!("formal-proof {:?} {}", backend, artifact.name);
+                let started_at = ConversationState::now();
+                match proof_verifier
+                    .verify_source(backend, &artifact.content)
+                    .await
+                {
+                    Ok(verification) => {
+                        use sha2::{Digest, Sha256};
+                        let completed_at = ConversationState::now();
+                        let output = serde_json::to_vec(&verification).unwrap_or_default();
+                        let specification = serde_json::to_vec(&serde_json::json!({
+                            "backend": format!("{backend:?}"),
+                            "timeout_secs": proof_verifier.policy.timeout_secs,
+                            "reject_placeholders": proof_verifier.policy.reject_placeholders,
+                        }))
+                        .unwrap_or_default();
+                        let status = match verification.status {
+                            crate::engines::formal_verification::ProofStatus::Verified => {
+                                crate::types::investigation::VerificationStatus::Verified
+                            }
+                            crate::engines::formal_verification::ProofStatus::Rejected => {
+                                crate::types::investigation::VerificationStatus::Rejected
+                            }
+                            crate::engines::formal_verification::ProofStatus::CheckerUnavailable => {
+                                crate::types::investigation::VerificationStatus::Unavailable
+                            }
+                            crate::engines::formal_verification::ProofStatus::TimedOut => {
+                                crate::types::investigation::VerificationStatus::TimedOut
+                            }
+                            crate::engines::formal_verification::ProofStatus::PolicyViolation => {
+                                crate::types::investigation::VerificationStatus::PolicyViolation
+                            }
+                        };
+                        records.push(crate::types::investigation::VerificationRecord {
+                            id: format!(
+                                "proof:{backend:?}:{}:v{}:{}",
+                                artifact.name,
+                                artifact.version,
+                                &verification.source_sha256[..16]
+                            ),
+                            kind: crate::types::investigation::VerificationKind::FormalProof,
+                            status,
+                            subject_id: artifact.name.clone(),
+                            evaluator_id: format!("{backend:?}"),
+                            evaluator_version: verification
+                                .checker_version
+                                .clone()
+                                .unwrap_or_else(|| "version-unavailable".into()),
+                            specification_sha256: format!("{:x}", Sha256::digest(&specification)),
+                            input_sha256: verification.source_sha256.clone(),
+                            output_sha256: format!("{:x}", Sha256::digest(&output)),
+                            measurements: vec![],
+                            diagnostics: verification.diagnostics.clone(),
+                            started_at,
+                            completed_at,
+                            reproduction_of: None,
+                        });
+                        results.push((
+                            label,
+                            format!("{:?}: {}", verification.status, verification.diagnostics),
+                            verification.is_verified(),
+                        ));
+                    }
+                    Err(error) => results.push((label, error.to_string(), false)),
+                }
+            }
+        }
+        VerificationBatch {
+            display: results,
+            records,
+        }
     }
 
     pub(super) async fn build_differential_prompt(&self, sigma: &ConversationState) -> String {
         let mut p = String::with_capacity(32_000);
+
+        // Apply a domain-neutral epistemic contract in addition to the selected
+        // interaction mode. This prevents code-oriented heuristics from silently
+        // governing debates, proofs, empirical questions, and inventions.
+        let task = sigma
+            .turns
+            .iter()
+            .find(|turn| turn.model_id == "User")
+            .map(|turn| turn.content.as_str())
+            .unwrap_or(&sigma.session_id);
+        let protocol = crate::engines::deliberation::DeliberationProtocol::for_task(task);
+        p.push_str(&protocol.prompt_contract());
+        p.push_str("\n\n");
 
         // Use evolved template as base if available, preferring select_for_agent over cache lookup
         let task_category = sigma
@@ -174,11 +276,9 @@ impl Orchestrator {
             30_000
         };
         let overhead = 2_000;
-        let artifact_budget = if artifact_count == 0 {
-            total_budget
-        } else {
-            (total_budget - overhead) / artifact_count
-        };
+        let artifact_budget = (total_budget - overhead)
+            .checked_div(artifact_count)
+            .unwrap_or(total_budget);
 
         for artifact in sigma.artifacts.values() {
             p.push_str(&format!(

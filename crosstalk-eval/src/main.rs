@@ -39,12 +39,12 @@ fn load_dotenv() {
 #[derive(Parser, Debug)]
 #[command(
     name = "crosstalk-eval",
-    about = "Benchmarking harness for Crosstalk UCB1 topology selection (arXiv companion)"
+    about = "Fail-closed benchmarking harness for Crosstalk"
 )]
 struct Args {
-    /// Path to GSM8K JSONL dataset file (falls back to synthetic problems if absent)
-    #[arg(short, long, default_value = "data/gsm8k_test.jsonl")]
-    dataset: PathBuf,
+    /// Run the simulated UCB1 topology scenarios with synthetic fixtures.
+    #[arg(long, default_value_t = false)]
+    synthetic: bool,
 
     /// Output directory for CSV reports
     #[arg(short, long, default_value = "results")]
@@ -99,11 +99,11 @@ struct Args {
     checkpoint: PathBuf,
 
     /// OpenRouter API key (reads OPENROUTER_API_KEY env / ~/.env)
-    #[arg(long, env = "OPENROUTER_API_KEY")]
+    #[arg(long, env = "OPENROUTER_API_KEY", hide_env_values = true)]
     openrouter_key: Option<String>,
 
     /// Anthropic API key — use this to switch to Claude models
-    #[arg(long, env = "ANTHROPIC_API_KEY")]
+    #[arg(long, env = "ANTHROPIC_API_KEY", hide_env_values = true)]
     api_key: Option<String>,
 
     /// LLM model ID (default: Haiku — Fast tier)
@@ -113,6 +113,10 @@ struct Args {
     /// Reasoning-tier model used for complex topologies and temporal escalation
     #[arg(long, default_value = claude_agent::OPUS_MODEL)]
     reasoning_model: String,
+
+    /// Acknowledge the mock repository and permit simulated model responses in development runs.
+    #[arg(long, default_value_t = false)]
+    mock: bool,
 
     /// API base URL for OpenAI-compatible providers; omit to use Anthropic
     #[arg(long, default_value = claude_agent::OPENROUTER_BASE)]
@@ -145,9 +149,17 @@ async fn main() -> Result<()> {
         .init();
 
     let args = Args::parse();
-    std::fs::create_dir_all(&args.output)?;
 
     let (api_key, api_base) = args.effective_agent();
+
+    if (args.live_run || args.smoke_test || args.swe_bench.is_some())
+        && api_key.is_none()
+        && !args.mock
+    {
+        anyhow::bail!(
+            "SWE-bench evaluation requires provider credentials; pass --mock only for explicit development simulations"
+        );
+    }
 
     if args.live_run || args.smoke_test {
         let swe_path = args.swe_bench.as_ref().ok_or_else(|| {
@@ -186,37 +198,51 @@ async fn main() -> Result<()> {
         return Ok(());
     }
 
-    let questions = dataset::load_gsm8k(&args.dataset).unwrap_or_else(|e| {
-        tracing::warn!("GSM8K dataset unavailable ({e}); using synthetic problems");
-        dataset::synthetic_math_questions(200)
-    });
-
-    tracing::info!("Loaded {} problems", questions.len());
-
-    if !args.scenario2_only {
-        tracing::info!("=== Scenario 1: Budget Pressure Test ===");
-        let records = scenarios::run_budget_pressure(&questions, args.seed)?;
-        let path = args.output.join("topology_distribution.csv");
-        report::write_budget_pressure_csv(&path, &records)?;
-        tracing::info!("Written: {}", path.display());
-        report::print_budget_pressure_summary(&records);
+    if args.swe_bench.is_some() && !args.mock {
+        anyhow::bail!(
+            "non-live SWE-bench uses a simulated repository environment; pass --mock to acknowledge this development mode, or use --live-run"
+        );
     }
 
-    if !args.scenario1_only {
-        tracing::info!("=== Scenario 2: UCB1 Convergence Test ===");
-        let records = scenarios::run_ucb1_convergence(&questions, args.seed)?;
-        let path = args.output.join("ucb1_convergence.csv");
-        report::write_ucb1_convergence_csv(&path, &records)?;
-        tracing::info!("Written: {}", path.display());
-        report::print_ucb1_convergence_summary(&records);
+    if !args.synthetic && args.swe_bench.is_none() {
+        anyhow::bail!(
+            "no evaluation mode selected; use --live-run with --swe-bench for a real container run, or explicitly select --synthetic / --mock for development"
+        );
+    }
+    std::fs::create_dir_all(&args.output)?;
+
+    if args.synthetic {
+        tracing::warn!(
+            "running an explicitly requested topology simulation; these are not model benchmark results"
+        );
+        let questions = dataset::synthetic_math_questions(200);
+        if !args.scenario2_only {
+            tracing::info!("=== Scenario 1: Simulated Budget Pressure Test ===");
+            let records = scenarios::run_budget_pressure(&questions, args.seed)?;
+            let path = args.output.join("topology_distribution.csv");
+            report::write_budget_pressure_csv(&path, &records)?;
+            tracing::info!("Written: {}", path.display());
+            report::print_budget_pressure_summary(&records);
+        }
+
+        if !args.scenario1_only {
+            tracing::info!("=== Scenario 2: Simulated UCB1 Convergence Test ===");
+            let records = scenarios::run_ucb1_convergence(&questions, args.seed)?;
+            let path = args.output.join("ucb1_convergence.csv");
+            report::write_ucb1_convergence_csv(&path, &records)?;
+            tracing::info!("Written: {}", path.display());
+            report::print_ucb1_convergence_summary(&records);
+        }
     }
 
     if let Some(swe_path) = args.swe_bench {
-        tracing::info!("=== Scenario 3: SWE-bench Evaluation ===");
-        let instances = swe_bench_runner::load_swe_bench(&swe_path).unwrap_or_else(|e| {
-            tracing::warn!("SWE-bench dataset unavailable ({e}); using synthetic instances");
-            swe_bench_runner::synthetic_swe_instances(20)
-        });
+        tracing::warn!("=== Scenario 3: SWE-bench development run with mock repository ===");
+        let instances = swe_bench_runner::load_swe_bench(&swe_path).map_err(|error| {
+            anyhow::anyhow!(
+                "failed to load real SWE-bench dataset {}: {error}",
+                swe_path.display()
+            )
+        })?;
         tracing::info!("Loaded {} SWE-bench instances", instances.len());
         let fallback_anthropic_key = if api_base.is_some() {
             args.api_key.clone()

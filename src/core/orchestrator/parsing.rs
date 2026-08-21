@@ -19,6 +19,9 @@ impl Orchestrator {
             "css" => "css",
             "sql" => "sql",
             "bash" | "sh" => "sh",
+            "lean" | "lean4" => "lean",
+            "coq" => "v",
+            "verus" => "rs",
             _ => "txt",
         }
     }
@@ -41,6 +44,8 @@ impl Orchestrator {
             "css" => "css",
             "sql" => "sql",
             "sh" | "bash" => "bash",
+            "lean" => "lean4",
+            "v" => "coq",
             _ => "",
         }
     }
@@ -127,10 +132,8 @@ impl Orchestrator {
             r
         } else if let Some(r) = t.strip_prefix("--") {
             r
-        } else if let Some(r) = t.strip_prefix("/*").and_then(|r| r.strip_suffix("*/")) {
-            r
         } else {
-            return None;
+            t.strip_prefix("/*").and_then(|r| r.strip_suffix("*/"))?
         };
         let rest = rest.trim();
         let candidate = rest

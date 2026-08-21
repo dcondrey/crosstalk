@@ -125,7 +125,7 @@ pub async fn fetch_openrouter_top_models(limit: usize) -> Vec<String> {
         })
         .collect();
 
-    candidates.sort_by(|a, b| b.1.cmp(&a.1));
+    candidates.sort_by_key(|item| std::cmp::Reverse(item.1));
 
     let mut seen_providers: std::collections::HashSet<String> = std::collections::HashSet::new();
     let mut result = Vec::new();

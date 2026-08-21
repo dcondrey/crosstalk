@@ -149,6 +149,14 @@ pub struct ConversationState {
     pub novel_signal: Option<String>,
     #[serde(default)]
     pub last_tool_outputs: Vec<(String, String)>,
+    /// Typed claims and evidence accumulated during domain-general inquiry.
+    #[serde(default)]
+    pub claim_ledger: crate::types::epistemics::ClaimLedger,
+    /// Evidence-linked hypotheses, verification records, and measurements for
+    /// the discovery process. Kept separate from the transcript so an audit can
+    /// distinguish what agents said from what the system actually established.
+    #[serde(default)]
+    pub investigation: crate::types::investigation::Investigation,
     #[serde(default)]
     pub rejection_loop_active: bool,
     #[serde(default)]
@@ -159,6 +167,11 @@ pub struct ConversationState {
     /// detectable without a secret key. Maintained in lockstep by `push_turn`.
     #[serde(default)]
     pub turn_hashes: Vec<Vec<u8>>,
+    /// Hash immediately preceding the first retained turn after the bounded
+    /// transcript window drops older entries. This keeps the first retained
+    /// turn verifiable instead of treating it as an uncommitted anchor.
+    #[serde(default)]
+    pub turn_chain_base: Option<Vec<u8>>,
 }
 
 impl ConversationState {
@@ -179,9 +192,12 @@ impl ConversationState {
             mode_library: crate::types::mode::ModeLibrary::new(),
             novel_signal: None,
             last_tool_outputs: Vec::new(),
+            claim_ledger: crate::types::epistemics::ClaimLedger::default(),
+            investigation: crate::types::investigation::Investigation::new(session_id, ""),
             rejection_loop_active: false,
             mode_active_turns: 0,
             turn_hashes: Vec::new(),
+            turn_chain_base: None,
         }
     }
 
@@ -193,6 +209,22 @@ impl ConversationState {
         }
         use crate::engines::validation::AstValidator;
         use crate::types::artifact::Artifact;
+        let content_sha256 = format!("{:x}", sha2::Sha256::digest(content.as_bytes()));
+        let evidence_id = format!("artifact:{}:{}", name, &content_sha256[..16]);
+        let evidence_kind = match language.to_ascii_lowercase().as_str() {
+            "lean" | "lean4" | "coq" | "verus" => crate::types::investigation::EvidenceKind::Proof,
+            "rust" | "rs" | "python" | "py" | "javascript" | "js" | "typescript" | "ts" | "go"
+            | "java" | "c" | "cpp" => crate::types::investigation::EvidenceKind::Code,
+            "csv" | "tsv" => crate::types::investigation::EvidenceKind::Dataset,
+            _ if name.starts_with("research/") => {
+                crate::types::investigation::EvidenceKind::SourceSnapshot
+            }
+            _ if name.starts_with("evolution/") => {
+                crate::types::investigation::EvidenceKind::Observation
+            }
+            _ => crate::types::investigation::EvidenceKind::SourceSnapshot,
+        };
+        let media_type = media_type_for_language(&language);
         let skeleton = AstValidator::generate_skeleton(&content, &language);
         let artifact = Artifact {
             name: name.clone(),
@@ -209,16 +241,43 @@ impl ConversationState {
         let metrics =
             crate::engines::quality::QualityEngine::analyze_artifact(&artifact, &all_names);
         self.artifacts.insert(
-            name,
+            name.clone(),
             std::sync::Arc::new(Artifact {
                 metrics,
                 ..artifact
             }),
         );
+        if !self.investigation.evidence.contains_key(&evidence_id)
+            && let Err(error) = self.investigation.register_evidence(
+                crate::types::investigation::EvidenceArtifact {
+                    id: evidence_id,
+                    kind: evidence_kind,
+                    title: name.clone(),
+                    content_sha256,
+                    media_type: media_type.into(),
+                    source_uri: None,
+                    locator: None,
+                    artifact_name: Some(name),
+                    verification_id: None,
+                    captured_at: Self::now(),
+                    independent: false,
+                    metadata: BTreeMap::new(),
+                },
+            )
+        {
+            tracing::warn!(%error, "failed to register ingested artifact as evidence");
+        }
     }
 
     pub fn push_turn(&mut self, turn: Turn) {
         const MAX_TURNS: usize = 200;
+        if turn.model_id != "User" {
+            self.claim_ledger.ingest_tagged(
+                turn.index,
+                &turn.content,
+                turn.certainty.unwrap_or(0.5),
+            );
+        }
         // Extend the tamper-evident hash chain before appending the turn.
         let mut hasher = sha2::Sha256::new();
         if let Some(prev) = self.turn_hashes.last() {
@@ -229,6 +288,7 @@ impl ConversationState {
         self.turns.push(turn);
         if self.turns.len() > MAX_TURNS {
             let excess = self.turns.len() - MAX_TURNS;
+            self.turn_chain_base = self.turn_hashes.get(excess - 1).cloned();
             self.turns.drain(..excess);
             // Keep the chain aligned with the retained turns.
             if self.turn_hashes.len() >= excess {
@@ -254,14 +314,22 @@ impl ConversationState {
     #[must_use]
     pub fn verify_chain(&self) -> Option<usize> {
         if self.turn_hashes.is_empty() {
-            return None; // legacy state with no recorded chain
+            return (!self.turns.is_empty()).then_some(0);
         }
         if self.turn_hashes.len() != self.turns.len() {
             return Some(0); // chain/turn count diverged → tampering
         }
-        for i in 1..self.turns.len() {
+        if self.turn_chain_base.is_none() && self.turns.first().is_some_and(|turn| turn.index != 0)
+        {
+            return Some(0);
+        }
+        for i in 0..self.turns.len() {
             let mut hasher = sha2::Sha256::new();
-            hasher.update(&self.turn_hashes[i - 1]);
+            if i > 0 {
+                hasher.update(&self.turn_hashes[i - 1]);
+            } else if let Some(base) = &self.turn_chain_base {
+                hasher.update(base);
+            }
             hasher.update(turn_content_hash(&self.turns[i]));
             if self.turn_hashes[i].as_slice() != hasher.finalize().as_slice() {
                 return Some(i);
@@ -275,5 +343,19 @@ impl ConversationState {
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
             .as_secs()
+    }
+}
+
+fn media_type_for_language(language: &str) -> &'static str {
+    match language.to_ascii_lowercase().as_str() {
+        "json" => "application/json",
+        "csv" => "text/csv",
+        "tsv" => "text/tab-separated-values",
+        "markdown" | "md" => "text/markdown",
+        "rust" | "rs" | "verus" => "text/x-rust",
+        "lean" | "lean4" => "text/x-lean",
+        "coq" => "text/x-coq",
+        "python" | "py" => "text/x-python",
+        _ => "text/plain",
     }
 }

@@ -563,7 +563,7 @@ impl IntelligenceEngine {
     /// formatted as descriptive strings for prompt injection.
     pub fn top_failure_patterns(&self, _category: TaskCategory, n: usize) -> Vec<String> {
         let mut patterns = self.failures.scan_all();
-        patterns.sort_by(|a, b| b.frequency.cmp(&a.frequency));
+        patterns.sort_by_key(|item| std::cmp::Reverse(item.frequency));
         patterns
             .into_iter()
             .take(n)

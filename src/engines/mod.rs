@@ -1,22 +1,29 @@
 //! Engine modules — each module owns one capability domain.
 //! Re-exported types below form the stable internal API used by the orchestrator.
+pub mod algorithm_discovery;
 pub mod analytics;
 pub mod collective_intelligence;
 pub mod compute;
 pub mod consensus;
 pub mod data_minimizer;
+pub mod deliberation;
 pub mod diff;
+pub mod formal_verification;
+pub mod idea_evolution;
 pub mod intelligence;
+pub mod investigation_bundle;
 pub mod linter;
 pub mod memory;
 pub mod metacognition;
 pub mod novelty;
+pub mod objective_evaluation;
 pub mod planning;
 pub mod prompt_evolution;
 pub mod proof;
 pub mod quality;
 pub mod reasoning;
 pub mod release;
+pub mod research;
 pub mod sandbox;
 pub mod security;
 pub mod self_improvement;

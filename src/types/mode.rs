@@ -172,6 +172,54 @@ impl ModeDefinition {
         }
     }
 
+    pub fn debate() -> Self {
+        Self {
+            name: "Debate".to_string(),
+            description: "Resolve disagreements through burdens of proof, steelmanning, and explicit cruxes.".to_string(),
+            context_distribution: ContextDistribution::RoleFiltered,
+            convergence_direction: ConvergenceDirection::TowardTradeoffMap,
+            surprise_handling: SurpriseHandling::Neutral,
+            termination: TerminationCondition::Exhaustion { max_turns: 8 },
+            role_assignment: RoleAssignment::AdversarialPairs,
+            loop_structure: LoopStructure::RejectionLoop,
+            prompt_prefix: "[MODE: DEBATE] Define the resolution and burdens of proof. Build the strongest case for each side independently, cross-examine pivotal premises, steelman before rebuttal, and identify the cruxes. The judge must decide claim-by-claim with calibrated confidence; agreement is not evidence.".to_string(),
+            synthesized: false,
+            synthesis_reason: None,
+        }
+    }
+
+    pub fn theorem() -> Self {
+        Self {
+            name: "Theorem".to_string(),
+            description: "Solve theoretical problems using formalization, counterexample search, and kernel-checked proofs.".to_string(),
+            context_distribution: ContextDistribution::RoleFiltered,
+            convergence_direction: ConvergenceDirection::TowardAgreement,
+            surprise_handling: SurpriseHandling::Amplify,
+            termination: TerminationCondition::Exhaustion { max_turns: 10 },
+            role_assignment: RoleAssignment::Specialized,
+            loop_structure: LoopStructure::TreeSearch,
+            prompt_prefix: "[MODE: THEOREM] Normalize definitions, assumptions, quantifiers, and target. Search boundary cases and countermodels before proving. Develop independent proof strategies. A proof sketch is not a proof: emit Lean 4, Verus, or Coq source for checker validation, and label unverified results CONJECTURE.".to_string(),
+            synthesized: false,
+            synthesis_reason: None,
+        }
+    }
+
+    pub fn invention() -> Self {
+        Self {
+            name: "Invention".to_string(),
+            description: "Invent falsifiable technologies from constraints and first principles.".to_string(),
+            context_distribution: ContextDistribution::Divergent,
+            convergence_direction: ConvergenceDirection::TowardNovelty,
+            surprise_handling: SurpriseHandling::Amplify,
+            termination: TerminationCondition::RejectionCycles { n: 4 },
+            role_assignment: RoleAssignment::Specialized,
+            loop_structure: LoopStructure::TreeSearch,
+            prompt_prefix: "[MODE: INVENTION] Translate needs into quantitative constraints. Generate orthogonal mechanisms from first principles, identify each proposal's novel technical delta, and score novelty separately from feasibility. Red-team physics, safety, scale, cost, and prior-art risk. Finish with the cheapest decisive prototype, measurements, and kill criteria.".to_string(),
+            synthesized: false,
+            synthesis_reason: None,
+        }
+    }
+
     pub fn presets() -> Vec<Self> {
         vec![
             Self::convergence(),
@@ -180,13 +228,37 @@ impl ModeDefinition {
             Self::decision(),
             Self::synthesis(),
             Self::socratic(),
+            Self::debate(),
+            Self::theorem(),
+            Self::invention(),
         ]
     }
 
     /// Detect the best preset for a task string. Returns index into `presets()`.
     pub fn detect_preset_index(task: &str) -> usize {
         let lower = task.to_lowercase();
-        if lower.contains("brainstorm")
+        if lower.contains("debate")
+            || lower.contains("argue for")
+            || lower.contains("case for and against")
+            || lower.contains("steelman")
+        {
+            6 // Debate
+        } else if lower.contains("theorem")
+            || lower.contains("prove that")
+            || lower.contains("formal proof")
+            || lower.contains("lemma")
+            || lower.contains("conjecture")
+        {
+            7 // Theorem
+        } else if lower.contains("invent")
+            || lower.contains("novel technology")
+            || lower.contains("new mechanism")
+            || lower.contains("prototype")
+            || lower.contains("patent")
+            || lower.contains("breakthrough")
+        {
+            8 // Invention
+        } else if lower.contains("brainstorm")
             || lower.contains("novel")
             || lower.contains("invent")
             || lower.contains("generate ideas")

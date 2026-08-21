@@ -1,4 +1,4 @@
-use crosstalk::engines::sandbox::{SandboxConfig, SandboxManager};
+use crosstalk::engines::sandbox::{I64TestCase, SandboxConfig, SandboxManager};
 use crosstalk::engines::simulation::MonteCarloRunner;
 use crosstalk::engines::validation::{AstValidator, AstVersionHistory};
 use crosstalk::types::artifact::Artifact;
@@ -65,6 +65,84 @@ async fn fuel_exhaustion_sets_resource_limit_hit() {
         Some(100_000),
         "the run should consume the full fuel budget before trapping"
     );
+}
+
+#[tokio::test]
+async fn hidden_i64_cases_use_fresh_instances_and_aggregate_fuel() {
+    let manager = std::sync::Arc::new(
+        SandboxManager::new(SandboxConfig {
+            memory_limit_bytes: 1024 * 1024,
+            cpu_fuel_limit: 100_000,
+            timeout_secs: 5,
+        })
+        .unwrap(),
+    );
+    // The mutable global would make later cases fail if instances were reused.
+    let wasm = wat::parse_str(
+        r#"
+        (module
+          (global $calls (mut i64) (i64.const 0))
+          (func (export "solve") (param $value i64) (result i64)
+            global.get $calls
+            i64.const 1
+            i64.add
+            global.set $calls
+            local.get $value
+            global.get $calls
+            i64.add))
+        "#,
+    )
+    .unwrap();
+    let cases = vec![
+        I64TestCase {
+            input: 4,
+            expected: 5,
+        },
+        I64TestCase {
+            input: 10,
+            expected: 11,
+        },
+    ];
+    let result = manager
+        .evaluate_i64_cases_with_timeout(&wasm, "solve", &cases)
+        .await
+        .unwrap();
+    assert!(result.all_cases_correct(cases.len()));
+    assert!(result.fuel_consumed > 0);
+    assert_eq!(result.outcomes.len(), cases.len());
+}
+
+#[tokio::test]
+async fn hidden_i64_case_traps_are_fail_closed() {
+    let manager = std::sync::Arc::new(
+        SandboxManager::new(SandboxConfig {
+            memory_limit_bytes: 1024 * 1024,
+            cpu_fuel_limit: 1_000,
+            timeout_secs: 5,
+        })
+        .unwrap(),
+    );
+    let wasm = wat::parse_str(
+        r#"
+        (module
+          (func (export "solve") (param i64) (result i64)
+            (loop $forever
+              br $forever)
+            i64.const 0))
+        "#,
+    )
+    .unwrap();
+    let cases = vec![I64TestCase {
+        input: 1,
+        expected: 1,
+    }];
+    let result = manager
+        .evaluate_i64_cases_with_timeout(&wasm, "solve", &cases)
+        .await
+        .unwrap();
+    assert!(result.trapped);
+    assert!(result.resource_limit_hit);
+    assert!(!result.all_cases_correct(cases.len()));
 }
 
 #[tokio::test]

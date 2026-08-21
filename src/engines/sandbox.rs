@@ -1,4 +1,5 @@
 use anyhow::{Context, Result};
+use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use std::time::Instant;
 use wasmtime::*;
@@ -47,6 +48,52 @@ pub struct SandboxResult {
     /// True when execution was killed by a resource limit (fuel exhaustion or
     /// the epoch deadline) rather than trapping for an ordinary reason.
     pub resource_limit_hit: bool,
+}
+
+/// One private test vector for a candidate that exports `(i64) -> i64`.
+/// Test vectors are deliberately owned by the evaluator rather than embedded
+/// in public discovery reports.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct I64TestCase {
+    pub input: i64,
+    pub expected: i64,
+}
+
+/// Non-secret outcome data for one hidden case. Inputs, expected values, and
+/// actual values are intentionally omitted so a report cannot become an oracle
+/// for the held-out test set.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct I64CaseOutcome {
+    pub index: usize,
+    pub passed: bool,
+    pub fuel_consumed: u64,
+    pub trapped: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct I64EvaluationResult {
+    pub outcomes: Vec<I64CaseOutcome>,
+    pub elapsed_ms: u64,
+    pub fuel_consumed: u64,
+    pub resource_limit_hit: bool,
+    pub trapped: bool,
+}
+
+impl I64EvaluationResult {
+    #[must_use]
+    pub fn correct_cases(&self) -> usize {
+        self.outcomes
+            .iter()
+            .filter(|outcome| outcome.passed)
+            .count()
+    }
+
+    #[must_use]
+    pub fn all_cases_correct(&self, expected_count: usize) -> bool {
+        self.outcomes.len() == expected_count
+            && self.outcomes.iter().all(|outcome| outcome.passed)
+            && !self.trapped
+    }
 }
 
 pub struct SandboxManager {
@@ -190,6 +237,126 @@ impl SandboxManager {
             )),
             Err(_elapsed) => Err(anyhow::anyhow!(
                 "sandbox execution timed out after {}s",
+                self.config.timeout_secs
+            )),
+        }
+    }
+
+    /// Evaluate a pure `(i64) -> i64` export against held-out cases. The module
+    /// is compiled once, but every case receives a fresh instance and store so
+    /// mutable globals or linear memory cannot leak information between cases.
+    /// A single fuel budget is shared by the complete evaluation.
+    pub fn evaluate_i64_cases(
+        &self,
+        wasm_bytes: &[u8],
+        export_name: &str,
+        cases: &[I64TestCase],
+    ) -> Result<I64EvaluationResult> {
+        anyhow::ensure!(
+            !cases.is_empty() && cases.len() <= 10_000,
+            "hidden test set must contain between 1 and 10000 cases"
+        );
+        anyhow::ensure!(
+            !export_name.trim().is_empty() && export_name.len() <= 256,
+            "WASM export name must contain between 1 and 256 bytes"
+        );
+
+        let start = Instant::now();
+        let module = Module::from_binary(&self.engine, wasm_bytes)
+            .context("failed to compile WASM candidate")?;
+        let mut remaining_fuel = self.config.cpu_fuel_limit;
+        let mut outcomes = Vec::with_capacity(cases.len());
+        let mut resource_limit_hit = false;
+        let mut trapped = false;
+
+        for (index, case) in cases.iter().enumerate() {
+            if remaining_fuel == 0 {
+                resource_limit_hit = true;
+                break;
+            }
+
+            let mut linker = Linker::new(&self.engine);
+            preview1::add_to_linker_sync(&mut linker, |state: &mut SandboxState| &mut state.wasi)?;
+            let wasi = WasiCtxBuilder::new().build_p1();
+            let limits = StoreLimitsBuilder::new()
+                .memory_size(self.config.memory_limit_bytes)
+                .build();
+            let mut store = Store::new(&self.engine, SandboxState { wasi, limits });
+            store.limiter(|state| &mut state.limits);
+            store.set_fuel(remaining_fuel)?;
+            store.set_epoch_deadline(EPOCH_DEADLINE_TICKS);
+
+            let instance = linker
+                .instantiate(&mut store, &module)
+                .context("failed to instantiate WASM candidate")?;
+            let function = instance
+                .get_typed_func::<i64, i64>(&mut store, export_name)
+                .with_context(|| {
+                    format!("missing or invalid WASM export {export_name:?}; expected (i64) -> i64")
+                })?;
+            let call = function.call(&mut store, case.input);
+            let fuel_after = store.get_fuel().unwrap_or_default();
+            let consumed = remaining_fuel.saturating_sub(fuel_after);
+            remaining_fuel = fuel_after;
+
+            match call {
+                Ok(actual) => outcomes.push(I64CaseOutcome {
+                    index,
+                    passed: actual == case.expected,
+                    fuel_consumed: consumed,
+                    trapped: false,
+                }),
+                Err(error) => {
+                    resource_limit_hit = matches!(
+                        error.downcast_ref::<Trap>(),
+                        Some(Trap::OutOfFuel | Trap::Interrupt)
+                    );
+                    trapped = true;
+                    outcomes.push(I64CaseOutcome {
+                        index,
+                        passed: false,
+                        fuel_consumed: consumed,
+                        trapped: true,
+                    });
+                    break;
+                }
+            }
+        }
+
+        Ok(I64EvaluationResult {
+            outcomes,
+            elapsed_ms: start.elapsed().as_millis() as u64,
+            fuel_consumed: self.config.cpu_fuel_limit.saturating_sub(remaining_fuel),
+            resource_limit_hit,
+            trapped,
+        })
+    }
+
+    /// Async wall-clock guard for [`Self::evaluate_i64_cases`].
+    pub async fn evaluate_i64_cases_with_timeout(
+        self: &Arc<Self>,
+        wasm_bytes: &[u8],
+        export_name: &str,
+        cases: &[I64TestCase],
+    ) -> Result<I64EvaluationResult> {
+        let timeout = tokio::time::Duration::from_secs(self.config.timeout_secs);
+        let bytes = wasm_bytes.to_vec();
+        let export = export_name.to_owned();
+        let cases = cases.to_vec();
+        let this = Arc::clone(self);
+        let result = tokio::time::timeout(
+            timeout,
+            tokio::task::spawn_blocking(move || this.evaluate_i64_cases(&bytes, &export, &cases)),
+        )
+        .await;
+
+        match result {
+            Ok(Ok(inner)) => inner,
+            Ok(Err(join_error)) => Err(anyhow::anyhow!(
+                "sandbox evaluation task panicked: {join_error}"
+            )),
+            Err(_) => Err(anyhow::anyhow!(
+                "sandbox evaluation timed out after {}s",
                 self.config.timeout_secs
             )),
         }

@@ -165,6 +165,7 @@ pub fn load_swe_bench(path: &Path) -> Result<Vec<SweBenchInstance>> {
 }
 
 /// Generate synthetic SWE-bench–style instances for offline testing.
+#[cfg(test)]
 pub fn synthetic_swe_instances(n: usize) -> Vec<SweBenchInstance> {
     const REPOS: &[(&str, &str)] = &[
         ("requests/requests", "3.0"),
