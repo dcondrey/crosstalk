@@ -6,6 +6,7 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) +
 ## [Unreleased]
 
 ### Added
+- Build verifiable general discovery platform
 - Runnable cross-verification of the cogmem C2PA sample
 - Emit orchestration audit statement into the live turn loop
 - Emit orchestration audit as shared-substrate COSE SCITT signed statement
@@ -75,6 +76,7 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) +
 - Reorganize into modular architecture (core, engines, types, mcp, ui, utils)
 
 ### Documentation
+- Update changelog [skip ci]
 - Update changelog [skip ci]
 - Restructure README with collapsible sections
 - Rewrite README — fix logo tag, add install/quick start, improve structure
