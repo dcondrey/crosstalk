@@ -78,12 +78,14 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) +
 ### Documentation
 - Update changelog [skip ci]
 - Update changelog [skip ci]
+- Update changelog [skip ci]
 - Restructure README with collapsible sections
 - Rewrite README — fix logo tag, add install/quick start, improve structure
 - Polish README and add agent-provenance stack cross-reference
 - Rewrite README and add writerslogic conventions (badges, community-health, dotfiles); set copyright to WritersLogic, Inc.
 
 ### Fixed
+- Install protoc in CI before Rust build steps (#16)
 - Surface sandbox fuel/elapsed and flag resource-limit kills
 - Propagate swallowed mode-transition emit errors
 - Persist computed nix_env instead of discarding it
