@@ -50,8 +50,10 @@ async fn test_check_rejects_failed_sandbox() {
 
 #[tokio::test]
 async fn test_check_passes_when_no_cargo_toml() {
-    // /tmp has no Cargo.toml, so clippy is skipped and we get a passing report
-    let report = LinterGuard::check(&ok_sandbox(), "/tmp", None)
+    let workspace = tempfile::tempdir().unwrap();
+    // The temporary workspace has no Cargo.toml, so clippy is skipped and we
+    // get a passing report on every platform.
+    let report = LinterGuard::check(&ok_sandbox(), workspace.path().to_str().unwrap(), None)
         .await
         .unwrap();
     assert!(report.passed);
@@ -60,7 +62,8 @@ async fn test_check_passes_when_no_cargo_toml() {
 
 #[tokio::test]
 async fn test_check_returns_lint_report_type() {
-    let report = LinterGuard::check(&ok_sandbox(), "/tmp", None)
+    let workspace = tempfile::tempdir().unwrap();
+    let report = LinterGuard::check(&ok_sandbox(), workspace.path().to_str().unwrap(), None)
         .await
         .unwrap();
     let _: LintReport = report;
