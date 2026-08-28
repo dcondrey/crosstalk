@@ -10,6 +10,9 @@ env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
 
+# Lance 0.25 overflows rustc's query-depth limit on 1.96 and newer. Keep all
+# jobs on the newest verified toolchain until the LanceDB dependency is upgraded.
+
 jobs:
   test:
     name: Test (${{ matrix.os }})
@@ -29,8 +32,9 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@1.94.0
         with:
+          components: clippy
           targets: ${{ matrix.target }}
 
       - name: Install protoc
@@ -57,8 +61,11 @@ jobs:
       - name: Test (lib)
         run: cargo test --lib --workspace
 
-      - name: Test (integration + doc)
-        run: cargo test --workspace --test '*' --doc
+      - name: Test (integration)
+        run: cargo test --workspace --test '*'
+
+      - name: Test (doc)
+        run: cargo test --workspace --doc
 
       # Verus formal proofs are NOT run here. They require a pinned nightly
       # toolchain and Z3, which would add significant CI overhead. See VERUS.md
@@ -74,7 +81,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@1.94.0
       - name: Run cargo audit
         run: cargo audit
       - name: Run cargo deny
@@ -88,7 +95,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@1.94.0
       - name: Install protoc
         uses: arduino/setup-protoc@v3
         with:
@@ -118,7 +125,7 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@1.94.0
         with:
           targets: ${{ matrix.target }}
 
