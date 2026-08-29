@@ -9,10 +9,17 @@ use wasmtime_wasi::preview1::{self, WasiP1Ctx};
 
 /// Default execution timeout in seconds for sandbox operations.
 const DEFAULT_TIMEOUT_SECS: u64 = 30;
-/// Number of epoch ticks allowed before the sandbox execution is interrupted.
-/// One tick fires per second (see the background incrementer in `SandboxManager::new`),
-/// so this acts as a coarse 1-second interrupt deadline independent of fuel.
-const EPOCH_DEADLINE_TICKS: u64 = 1;
+/// Epoch ticks fire once per second from the free-running incrementer in
+/// `SandboxManager::new`, so a deadline of k ticks buys somewhere in (k-1, k]
+/// seconds depending on when the call starts relative to the ticker.
+///
+/// IMPORTANT: the epoch deadline is a liveness backstop only. Fuel is the
+/// deterministic bound, and the evaluator's reproduction gate requires
+/// bit-identical measurements, so anything that makes the wall clock the
+/// binding constraint turns a valid result into a coin flip. The deadline is
+/// therefore derived from the operator's `timeout_secs` with one extra tick
+/// covering the ticker phase.
+const EPOCH_PHASE_SLACK_TICKS: u64 = 1;
 
 #[derive(Debug, Clone)]
 pub struct SandboxConfig {
@@ -103,6 +110,12 @@ pub struct SandboxManager {
 }
 
 impl SandboxManager {
+    fn epoch_deadline_ticks(&self) -> u64 {
+        self.config
+            .timeout_secs
+            .saturating_add(EPOCH_PHASE_SLACK_TICKS)
+    }
+
     pub fn new(config: SandboxConfig) -> Result<Self> {
         anyhow::ensure!(
             config.memory_limit_bytes > 0,
@@ -160,7 +173,7 @@ impl SandboxManager {
         let mut store = Store::new(&self.engine, SandboxState { wasi, limits });
         store.limiter(|state| &mut state.limits);
         store.set_fuel(self.config.cpu_fuel_limit)?;
-        store.set_epoch_deadline(EPOCH_DEADLINE_TICKS);
+        store.set_epoch_deadline(self.epoch_deadline_ticks());
 
         let module = Module::from_binary(&self.engine, wasm_bytes)
             .context("failed to compile WASM module from provided bytes")?;
@@ -284,7 +297,7 @@ impl SandboxManager {
             let mut store = Store::new(&self.engine, SandboxState { wasi, limits });
             store.limiter(|state| &mut state.limits);
             store.set_fuel(remaining_fuel)?;
-            store.set_epoch_deadline(EPOCH_DEADLINE_TICKS);
+            store.set_epoch_deadline(self.epoch_deadline_ticks());
 
             let instance = linker
                 .instantiate(&mut store, &module)
