@@ -464,3 +464,34 @@ fn default_sandbox_config_has_reasonable_limits() {
     assert!(config.memory_limit_bytes > 0);
     assert!(config.cpu_fuel_limit > 0);
 }
+
+/// Regression pin: `set_epoch_deadline` was a fixed 1 tick against a
+/// free-running one-second incrementer, so every call died after at most one
+/// second of wall clock no matter what the operator configured. The evaluator's
+/// reproduction gate compares fuel bit-for-bit, so any candidate costing about
+/// a second became a coin flip between the primary and reproduction passes.
+///
+/// FIXME: this pins the derivation, not the call site, so it does not fail
+/// against the pre-fix code and is not a complete regression pin. Three
+/// behavioural attempts failed to bite: synthetic busy loops get folded away by
+/// the optimiser, and a deliberately aged manager still runs fine under the old
+/// fixed deadline, which refutes the obvious "the budget is the manager's own
+/// age" reading. The verified causal handle is in
+/// docs/rule30/RESULTS-arm3-run1.md: forcing `--timeout-secs 1` on a real
+/// tournament reproduces the original divergence exactly, and raising it cures
+/// it. The mechanism behind the primary/reproduction asymmetry is still
+/// unexplained.
+#[tokio::test]
+async fn the_epoch_deadline_scales_with_the_configured_timeout() {
+    let ticks = |timeout_secs| {
+        SandboxManager::new(SandboxConfig {
+            memory_limit_bytes: 16 * 1024 * 1024,
+            cpu_fuel_limit: 100_000_000,
+            timeout_secs,
+        })
+        .unwrap()
+        .epoch_deadline_ticks()
+    };
+    assert!(ticks(300) > 300, "a 300s timeout must outlast 300 ticks");
+    assert!(ticks(30) > ticks(1), "the deadline must track the timeout");
+}

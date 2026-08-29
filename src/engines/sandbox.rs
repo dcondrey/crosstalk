@@ -110,7 +110,11 @@ pub struct SandboxManager {
 }
 
 impl SandboxManager {
-    fn epoch_deadline_ticks(&self) -> u64 {
+    /// Epoch ticks granted to a single call. REQUIRED: this MUST stay derived
+    /// from `timeout_secs`. A constant here silently caps every execution at
+    /// that many seconds regardless of what the operator configured, which
+    /// breaks the evaluator's bit-identical reproduction contract.
+    pub fn epoch_deadline_ticks(&self) -> u64 {
         self.config
             .timeout_secs
             .saturating_add(EPOCH_PHASE_SLACK_TICKS)
