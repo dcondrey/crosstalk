@@ -189,13 +189,38 @@ pub struct Orchestrator {
 
 fn resolve_memory_store_path() -> Result<String> {
     use std::path::{Component, PathBuf};
-    let base: PathBuf = if let Ok(d) = std::env::var("XDG_DATA_HOME") {
-        PathBuf::from(d).join("crosstalk")
-    } else if let Ok(h) = std::env::var("HOME") {
-        PathBuf::from(h).join(".local/share/crosstalk")
-    } else {
-        anyhow::bail!("neither XDG_DATA_HOME nor HOME is set; cannot resolve memory store path");
-    };
+    let data_home = std::env::var_os("XDG_DATA_HOME")
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| {
+            #[cfg(windows)]
+            {
+                std::env::var_os("LOCALAPPDATA")
+                    .filter(|value| !value.is_empty())
+                    .map(PathBuf::from)
+                    .or_else(|| {
+                        std::env::var_os("USERPROFILE")
+                            .filter(|value| !value.is_empty())
+                            .map(|value| PathBuf::from(value).join("AppData/Local"))
+                    })
+            }
+            #[cfg(not(windows))]
+            {
+                std::env::var_os("HOME")
+                    .filter(|value| !value.is_empty())
+                    .map(|value| PathBuf::from(value).join(".local/share"))
+            }
+        })
+        .ok_or_else(|| {
+            #[cfg(windows)]
+            let message =
+                "none of XDG_DATA_HOME, LOCALAPPDATA, or USERPROFILE is set; cannot resolve memory store path";
+            #[cfg(not(windows))]
+            let message =
+                "neither XDG_DATA_HOME nor HOME is set; cannot resolve memory store path";
+            anyhow::anyhow!(message)
+        })?;
+    let base: PathBuf = data_home.join("crosstalk");
     if base.components().any(|c| matches!(c, Component::ParentDir)) {
         anyhow::bail!(
             "memory store path contains parent-dir traversal: {}",
