@@ -1,7 +1,11 @@
-# Crosstalk — Verus Formal Verification
+<img src="../assets/icon.png" alt="Crosstalk" width="88" align="left">
 
-This directory contains formal specifications and SMT-verified proofs for core
-invariants of the Crosstalk runtime. The proofs use
+<h1>Crosstalk formal verification</h1>
+<p><strong>Verus specifications and SMT-verified proofs for core Crosstalk runtime invariants.</strong></p>
+
+<br clear="left">
+
+The proofs use
 [Verus](https://github.com/verus-lang/verus), a Rust-based verification tool
 backed by the Z3 SMT solver.
 
