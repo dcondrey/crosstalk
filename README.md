@@ -10,7 +10,7 @@
 <p align="center">
   <a href="https://github.com/dcondrey/crosstalk/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/dcondrey/crosstalk/ci.yml?branch=main&amp;style=flat-square&amp;label=CI&amp;labelColor=20232a" alt="CI"></a>
   <a href="https://scorecard.dev/viewer/?uri=github.com/dcondrey/crosstalk"><img src="https://img.shields.io/ossf-scorecard/github.com/dcondrey/crosstalk?style=flat-square&amp;labelColor=20232a" alt="OpenSSF Scorecard"></a>
-  <a href="./.bestpractices.json"><img src="https://img.shields.io/badge/best_practices-evidence-6a4c93?style=flat-square&amp;labelColor=20232a" alt="Best Practices evidence"></a>
+  <a href="https://www.bestpractices.dev/projects/14403"><img src="https://www.bestpractices.dev/projects/14403/badge" alt="OpenSSF Best Practices"></a>
   <a href="./src/mcp/"><img src="https://badge.mcpx.dev?type=server&amp;features=resources,tools,prompts,sampling" alt="MCP server: resources, tools, prompts, and sampling"></a>
   <a href="https://www.rust-lang.org"><img src="https://img.shields.io/badge/Rust-1.91%2B-007ec6?style=flat-square&amp;labelColor=20232a&amp;logo=rust&amp;logoColor=white" alt="Rust 1.91+"></a>
   <a href="./LICENSE"><img src="https://img.shields.io/badge/license-Apache--2.0-007ec6?style=flat-square&amp;labelColor=20232a" alt="Apache-2.0 license"></a>
