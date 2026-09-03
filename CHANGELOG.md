@@ -6,6 +6,9 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) +
 ## [Unreleased]
 
 ### Added
+- Add sealed evaluation with a worker binary and CLI
+- Describe eval runs with a manifest
+- Cap challenge artifact size and pin the sandbox epoch invariant
 - Build verifiable general discovery platform
 - Runnable cross-verification of the cogmem C2PA sample
 - Emit orchestration audit statement into the live turn loop
@@ -76,6 +79,7 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) +
 - Reorganize into modular architecture (core, engines, types, mcp, ui, utils)
 
 ### Documentation
+- Update changelog [skip ci]
 - Standardize repository presentation (#22)
 - Update changelog [skip ci]
 - Update changelog [skip ci]
@@ -84,6 +88,7 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) +
 - Update changelog [skip ci]
 - Update changelog [skip ci]
 - Update changelog [skip ci]
+- Add support policy, OpenSSF metadata, and refresh the design notes
 - Update changelog [skip ci]
 - Update changelog [skip ci]
 - Restructure README with collapsible sections
@@ -92,9 +97,11 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) +
 - Rewrite README and add writerslogic conventions (badges, community-health, dotfiles); set copyright to WritersLogic, Inc.
 
 ### Fixed
+- Pin Rust toolchain for Lance compatibility
 - Resolve Windows data directory
 - Pin Rust toolchain for Lance compatibility (#17)
 - Install protoc in CI before Rust build steps (#16)
+- Flaky sandbox epoch deadline
 - Surface sandbox fuel/elapsed and flag resource-limit kills
 - Propagate swallowed mode-transition emit errors
 - Persist computed nix_env instead of discarding it
