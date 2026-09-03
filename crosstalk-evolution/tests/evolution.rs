@@ -35,6 +35,7 @@ impl CandidateGenerator for Generator {
             predicted_measurements: vec!["reduces held-out error".into()],
             kill_criteria: vec!["no improvement over preregistered baseline".into()],
             tags: BTreeSet::new(),
+            executable_contract: None,
         })
     }
 }
@@ -63,6 +64,20 @@ impl CandidateEvaluator for Evaluator {
     }
 }
 
+struct FailingEvaluator;
+
+#[async_trait]
+impl CandidateEvaluator for FailingEvaluator {
+    async fn evaluate(
+        &self,
+        _draft: &ConceptDraft,
+        _parents: &[&Concept],
+        _context: &GenerationContext<'_>,
+    ) -> Result<Fitness, String> {
+        Err("critic returned malformed JSON".into())
+    }
+}
+
 #[tokio::test]
 async fn generation_is_deterministic_and_checkpointable() {
     let config = EvolutionConfig {
@@ -79,6 +94,81 @@ async fn generation_is_deterministic_and_checkpointable() {
     assert_eq!(a.state.active_population.len(), 4);
     let restored = EvolutionState::restore_json(&a.state.checkpoint_json().unwrap()).unwrap();
     assert_eq!(restored, a.state);
+}
+
+#[tokio::test]
+async fn model_call_slots_are_reserved_before_parallel_evolution() {
+    let config = EvolutionConfig {
+        population_size: 4,
+        max_concurrency: 4,
+        max_model_call_slots: 4,
+        ..Default::default()
+    };
+    let state = EvolutionState::new("budgeted", "invent", 42, config);
+    let mut engine = EvolutionEngine::new(state, Generator, Evaluator);
+    let report = engine.run_generation().await.unwrap();
+    assert_eq!(report.attempts, 2);
+    assert_eq!(report.accepted.len(), 2);
+    assert!(report.budget_exhausted);
+    assert_eq!(report.usage.attempts_started, 2);
+    assert_eq!(report.usage.model_call_slots_reserved, 4);
+    assert_eq!(report.usage.generations_completed, 1);
+    assert!(matches!(
+        engine.run_generation().await,
+        Err(crosstalk_evolution::EvolutionError::BudgetExhausted)
+    ));
+    let restored = EvolutionState::restore_json(&engine.state.checkpoint_json().unwrap()).unwrap();
+    assert_eq!(restored.usage, report.usage);
+}
+
+#[tokio::test]
+async fn evaluator_failures_are_retained_as_negative_knowledge() {
+    let config = EvolutionConfig {
+        population_size: 1,
+        max_model_call_slots: 2,
+        ..Default::default()
+    };
+    let state = EvolutionState::new("failure-ledger", "invent", 42, config);
+    let mut engine = EvolutionEngine::new(state, Generator, FailingEvaluator);
+
+    let report = engine.run_generation().await.unwrap();
+
+    assert_eq!(report.failures.len(), 1);
+    assert!(
+        report.failures[0]
+            .candidate_title
+            .as_deref()
+            .is_some_and(|title| title.starts_with("Candidate 0 "))
+    );
+    assert_eq!(engine.state.rejected_candidates.len(), 1);
+    assert_eq!(
+        engine.state.rejected_candidates[0].reason,
+        "evaluation_failure"
+    );
+    assert!(
+        engine
+            .state
+            .directive
+            .contains("critic returned malformed JSON")
+    );
+}
+
+#[test]
+fn fitness_accepts_single_fatal_flaw_from_model_json() {
+    let fitness: Fitness = serde_json::from_value(serde_json::json!({
+        "novelty": 1.0,
+        "feasibility": 1.0,
+        "utility": 1.0,
+        "semantic_jump": 1.0,
+        "evidence": 0.0,
+        "safety": 8.0,
+        "prior_art_overlap": 1.0,
+        "fatal_flaws": "an unproved recurrence",
+        "next_directive": "replace it"
+    }))
+    .unwrap();
+
+    assert_eq!(fitness.fatal_flaws, vec!["an unproved recurrence"]);
 }
 
 #[test]
@@ -142,6 +232,7 @@ fn pareto_retention_preserves_distinct_strengths() {
             predicted_measurements: vec!["x".into()],
             kill_criteria: vec!["y".into()],
             tags: BTreeSet::new(),
+            executable_contract: None,
         },
         fitness: Fitness {
             novelty,
@@ -199,8 +290,186 @@ fn malformed_drafts_are_rejected_before_evaluation() {
         predicted_measurements: vec![],
         kill_criteria: vec![],
         tags: BTreeSet::new(),
+        executable_contract: None,
     };
     assert!(draft.validate().is_err());
+}
+
+#[test]
+fn falsification_probe_rejects_missing_argv_and_unbounded_timeout() {
+    let mut probe = FalsificationProbe {
+        language: "python3".into(),
+        source: "print('ok')".into(),
+        argv: vec![],
+        timeout_seconds: 301,
+        falsifies_when: "stdout contains counterexample".into(),
+    };
+    assert!(probe.validate().is_err());
+    probe.argv = vec!["python3".into(), "probe.py".into()];
+    probe.timeout_seconds = 5;
+    assert!(probe.validate().is_ok());
+}
+
+struct ContractGenerator {
+    distinguishes_from: BTreeMap<String, String>,
+}
+
+#[async_trait]
+impl CandidateGenerator for ContractGenerator {
+    async fn generate(
+        &self,
+        _operator: MutationOperator,
+        _parents: &[&Concept],
+        context: &GenerationContext<'_>,
+    ) -> Result<ConceptDraft, String> {
+        Ok(ConceptDraft {
+            domain: "Computer Science".into(),
+            title: format!("Cosmetic title {}", context.attempt),
+            mechanism: "Compose exact boundary summaries".into(),
+            rationale: "The composition identity is the candidate".into(),
+            predicted_measurements: vec!["matches exhaustive outputs".into()],
+            kill_criteria: vec!["one counterexample rejects it".into()],
+            tags: BTreeSet::new(),
+            executable_contract: Some(ExecutableContract {
+                representation: "boundary state tuple".into(),
+                exact_relation: "summary(left ++ right) = merge(summary(left), summary(right))"
+                    .into(),
+                composition_rule: "merge the two boundary state tuples".into(),
+                complexity_argument: "balanced composition visits logarithmically many tuples"
+                    .into(),
+                objective_test: "compare every input through size 20 against exhaustive evolution"
+                    .into(),
+                falsification_probe: Some(FalsificationProbe {
+                    language: "python3".into(),
+                    source: "print('ok')".into(),
+                    argv: vec!["python3".into(), "probe.py".into()],
+                    timeout_seconds: 5,
+                    falsifies_when: "the probe prints a counterexample".into(),
+                }),
+                distinguishes_from: self.distinguishes_from.clone(),
+            }),
+        })
+    }
+}
+
+#[tokio::test]
+async fn structural_contract_deduplicates_cosmetic_variants() {
+    let config = EvolutionConfig {
+        population_size: 2,
+        max_attempt_multiplier: 2,
+        require_executable_contract: true,
+        ..Default::default()
+    };
+    let state = EvolutionState::new("structural", "find a composition", 8, config);
+    let mut engine = EvolutionEngine::new(
+        state,
+        ContractGenerator {
+            distinguishes_from: BTreeMap::new(),
+        },
+        Evaluator,
+    );
+
+    let report = engine.run_generation().await.unwrap();
+
+    assert_eq!(report.accepted.len(), 1);
+    assert!(report.rejected >= 1);
+}
+
+#[tokio::test]
+async fn required_falsification_probe_rejects_prose_only_contracts() {
+    struct ProseOnlyGenerator;
+    #[async_trait]
+    impl CandidateGenerator for ProseOnlyGenerator {
+        async fn generate(
+            &self,
+            _operator: MutationOperator,
+            _parents: &[&Concept],
+            _context: &GenerationContext<'_>,
+        ) -> Result<ConceptDraft, String> {
+            Ok(ConceptDraft {
+                domain: "Computer Science".into(),
+                title: "Prose-only contract".into(),
+                mechanism: "A claimed exact composition".into(),
+                rationale: "The test is not implemented".into(),
+                predicted_measurements: vec!["agreement".into()],
+                kill_criteria: vec!["one mismatch".into()],
+                tags: BTreeSet::new(),
+                executable_contract: Some(ExecutableContract {
+                    representation: "boundary tuple".into(),
+                    exact_relation: "summary(a ++ b) = merge(summary(a), summary(b))".into(),
+                    composition_rule: "merge two summaries".into(),
+                    complexity_argument: "balanced merges".into(),
+                    objective_test: "someone should compare it with exhaustive data".into(),
+                    falsification_probe: None,
+                    distinguishes_from: BTreeMap::new(),
+                }),
+            })
+        }
+    }
+
+    let config = EvolutionConfig {
+        population_size: 1,
+        max_attempt_multiplier: 1,
+        require_executable_contract: true,
+        require_falsification_probe: true,
+        ..Default::default()
+    };
+    let state = EvolutionState::new("probe-required", "supply source", 18, config);
+    let mut engine = EvolutionEngine::new(state, ProseOnlyGenerator, Evaluator);
+    let report = engine.run_generation().await.unwrap();
+    assert!(report.accepted.is_empty());
+    assert_eq!(report.rejection_reasons["missing_falsification_probe"], 1);
+}
+
+#[tokio::test]
+async fn eliminated_family_requires_an_explicit_structural_distinction() {
+    let config = EvolutionConfig {
+        population_size: 1,
+        max_attempt_multiplier: 1,
+        require_executable_contract: true,
+        ..Default::default()
+    };
+    let mut state = EvolutionState::new("elimination", "avoid the dead end", 9, config);
+    state.structural_exclusions.push(StructuralExclusion {
+        id: "row-parity".into(),
+        description: "Row parity cancellation leaves half the rows".into(),
+        structural_features: vec!["parity cancellation popcount rows".into()],
+        evidence_ids: vec!["probe:parity-survival".into()],
+    });
+    let mut missing = EvolutionEngine::new(
+        state.clone(),
+        ContractGenerator {
+            distinguishes_from: BTreeMap::new(),
+        },
+        Evaluator,
+    );
+    let missing_report = missing.run_generation().await.unwrap();
+    assert!(missing_report.accepted.is_empty());
+    assert_eq!(
+        missing_report.rejection_reasons["exclusion_not_distinguished"],
+        1
+    );
+    assert_eq!(
+        missing.state.rejected_candidates[0].reason,
+        "exclusion_not_distinguished"
+    );
+    assert!(missing.state.directive.contains("Do not repeat"));
+    assert_eq!(
+        missing.state.rejected_titles.last().map(String::as_str),
+        Some("Cosmetic title 0")
+    );
+
+    let mut covered = EvolutionEngine::new(
+        state,
+        ContractGenerator {
+            distinguishes_from: BTreeMap::from([(
+                "row-parity".into(),
+                "uses exact boundary-state composition, not row cancellation".into(),
+            )]),
+        },
+        Evaluator,
+    );
+    assert_eq!(covered.run_generation().await.unwrap().accepted.len(), 1);
 }
 
 #[test]
@@ -225,6 +494,7 @@ fn objective_feedback_state() -> EvolutionState {
             predicted_measurements: vec!["runtime".into()],
             kill_criteria: vec!["fails correctness suite".into()],
             tags: BTreeSet::new(),
+            executable_contract: None,
         },
         fitness: Fitness {
             novelty: 9.0,
@@ -363,6 +633,7 @@ impl CandidateGenerator for ConcurrentGenerator {
             predicted_measurements: vec!["measurement".into()],
             kill_criteria: vec!["failed measurement".into()],
             tags: BTreeSet::new(),
+            executable_contract: None,
         })
     }
 }

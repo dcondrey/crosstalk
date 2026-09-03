@@ -4,7 +4,7 @@
 //! records what the system can actually support: hypotheses, evidence,
 //! measurements, verification results, and the links between them.
 
-use crate::types::epistemics::{ClaimLedger, ClaimStatus, EvidenceRef};
+use crate::types::epistemics::{ClaimKind, ClaimLedger, ClaimStatus, EvidenceRef};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -146,6 +146,40 @@ pub struct ChainOfEvidenceAudit {
     pub verified_claims: usize,
     pub verification_coverage: f64,
     pub issues: Vec<EvidenceAuditIssue>,
+}
+
+/// A stricter, separate decision from the integrity audit. `audit.passed`
+/// means the evidence graph is internally consistent; it does not mean the
+/// result has enough verified evidence to be reported as established.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct ScientificReleaseAssessment {
+    pub eligible: bool,
+    pub integrity_passed: bool,
+    pub substantive_claims: usize,
+    pub evidence_linked_claims: usize,
+    pub objectively_verified_claims: usize,
+    pub verification_coverage: f64,
+    pub blocking_reasons: Vec<String>,
+}
+
+impl ScientificReleaseAssessment {
+    /// User-facing boundary for model prose that has not passed the scientific
+    /// release gate.  Integrity alone does not make a synthesis evidentially
+    /// established.
+    #[must_use]
+    pub fn unverified_warning(&self) -> Option<String> {
+        if self.eligible {
+            return None;
+        }
+        let reasons = if self.blocking_reasons.is_empty() {
+            "the scientific release requirements were not met".to_string()
+        } else {
+            self.blocking_reasons.join("; ")
+        };
+        Some(format!(
+            "Unverified model synthesis—not an established conclusion. Blocking reasons: {reasons}. Rejected candidates and finite measurements do not by themselves establish universal claims."
+        ))
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -599,6 +633,67 @@ impl Investigation {
             verified_claims,
             verification_coverage,
             issues,
+        }
+    }
+
+    /// Assess whether a result is ready to be described as scientifically
+    /// established. Proposals, conjectures, and assumptions remain useful in a
+    /// bundle, but they cannot by themselves satisfy this gate.
+    #[must_use]
+    pub fn scientific_release_assessment(
+        &self,
+        claims: &ClaimLedger,
+    ) -> ScientificReleaseAssessment {
+        let audit = self.audit(claims);
+        let substantive = claims
+            .claims
+            .values()
+            .filter(|claim| matches!(claim.kind, ClaimKind::Fact | ClaimKind::Inference))
+            .collect::<Vec<_>>();
+        let evidence_linked_claims = substantive
+            .iter()
+            .filter(|claim| claim.evidence.iter().any(|evidence| evidence.supports))
+            .count();
+        let objectively_verified_claims = substantive
+            .iter()
+            .filter(|claim| {
+                matches!(
+                    claim.status,
+                    ClaimStatus::Supported | ClaimStatus::FormallyVerified
+                ) && self.verifications.values().any(|record| {
+                    record.subject_id == claim.id && record.status == VerificationStatus::Verified
+                })
+            })
+            .count();
+        let verification_coverage = if substantive.is_empty() {
+            0.0
+        } else {
+            objectively_verified_claims as f64 / substantive.len() as f64
+        };
+        let mut blocking_reasons = Vec::new();
+        if !audit.passed {
+            blocking_reasons.push("evidence graph failed its integrity audit".into());
+        }
+        if substantive.is_empty() {
+            blocking_reasons.push("no explicit fact or inference was recorded".into());
+        } else {
+            if evidence_linked_claims < substantive.len() {
+                blocking_reasons.push("one or more substantive claims lack evidence links".into());
+            }
+            if objectively_verified_claims < substantive.len() {
+                blocking_reasons.push(
+                    "one or more substantive claims lack accepting objective verification".into(),
+                );
+            }
+        }
+        ScientificReleaseAssessment {
+            eligible: blocking_reasons.is_empty(),
+            integrity_passed: audit.passed,
+            substantive_claims: substantive.len(),
+            evidence_linked_claims,
+            objectively_verified_claims,
+            verification_coverage,
+            blocking_reasons,
         }
     }
 

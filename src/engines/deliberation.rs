@@ -191,7 +191,7 @@ impl DeliberationProtocol {
             .collect::<Vec<_>>()
             .join("\n");
         format!(
-            "[EPISTEMIC PROTOCOL: {:?}]\nRoles: {roles}\nPhases:\n{phases}\nCompletion requires:\n{completion}\nPrefix material claims with [FACT], [ASSUMPTION], [INFERENCE], [CONJECTURE], or [PROPOSAL] so they enter the claim ledger. Separate these categories rigorously. Calibrate confidence and state what evidence would change the conclusion.",
+            "[EPISTEMIC PROTOCOL: {:?}]\nRoles: {roles}\nPhases:\n{phases}\nCompletion requires:\n{completion}\nPrefix material claims with [FACT], [ASSUMPTION], [INFERENCE], [CONJECTURE], or [PROPOSAL] so they enter the claim ledger. Separate these categories rigorously. Preserve source-stated claim boundaries: finite measurements and rejected proposals exclude only the tested instances or explicitly defined families; a universal nonexistence claim requires an exhaustive proof or accepting objective verification. Calibrate confidence and state what evidence would change the conclusion.",
             self.domain
         )
     }

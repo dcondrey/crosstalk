@@ -1,6 +1,8 @@
 use crosstalk::core::agent_trait::PromptAgent;
 use crosstalk::core::orchestrator::Orchestrator;
 use crosstalk::core::state::StateManager;
+use crosstalk::engines::investigation_bundle::{BundleOptions, InvestigationBundleExporter};
+use crosstalk::engines::security::TurnVerifier;
 use crosstalk::engines::surprise::SurpriseEngine;
 use crosstalk::engines::verification::HashChain;
 use crosstalk::types::conversation::{ConversationState, Turn, TurnOutcome};
@@ -67,6 +69,19 @@ async fn make_orchestrator(
         .expect("Failed to create orchestrator")
 }
 
+async fn make_orchestrator_in_workspace(
+    manager: StateManager,
+    agents: Vec<Box<dyn PromptAgent>>,
+    workspace: std::path::PathBuf,
+) -> Orchestrator {
+    let (event_tx, mut event_rx) = mpsc::channel::<StreamEvent>(1000);
+    let (_control_tx, control_rx) = mpsc::channel::<ControlSignal>(100);
+    tokio::spawn(async move { while event_rx.recv().await.is_some() {} });
+    Orchestrator::new(manager, agents, event_tx, control_rx, Some(workspace))
+        .await
+        .expect("Failed to create orchestrator")
+}
+
 fn make_sigma(session: &str) -> Arc<Mutex<ConversationState>> {
     Arc::new(Mutex::new(ConversationState::new(session)))
 }
@@ -79,7 +94,8 @@ async fn test_orchestrator_turn_advances_index() {
         name: "MockModel".to_string(),
         response: "Hello, I am a model.".to_string(),
     });
-    let omicron = make_orchestrator(manager, vec![agent]).await;
+    let omicron =
+        make_orchestrator_in_workspace(manager, vec![agent], dir.path().join("workspace")).await;
     let sigma = make_sigma("test-session");
 
     let is_optimal = omicron.run_turn(sigma.clone()).await.expect("turn failed");
@@ -145,7 +161,8 @@ async fn test_orchestrator_captures_artifact_diffs() {
             "Here is the implementation:\n```rust:test.rs\nfn main() { println!(\"Hello\"); }\n```"
                 .to_string(),
     });
-    let omicron = make_orchestrator(manager, vec![agent]).await;
+    let omicron =
+        make_orchestrator_in_workspace(manager, vec![agent], dir.path().join("workspace")).await;
     let sigma = make_sigma("test-session");
 
     omicron.run_turn(sigma.clone()).await.expect("turn failed");
@@ -185,6 +202,81 @@ async fn test_orchestrator_captures_artifact_diffs() {
 }
 
 #[tokio::test]
+async fn rejected_formal_proof_fails_turn_and_preserves_transcript_chain() {
+    let dir = tempdir().expect("temp dir");
+    let state_dir = dir.path().join("state");
+    let workspace = dir.path().join("workspace");
+    let manager = StateManager::new(state_dir.to_str().expect("path")).expect("state manager");
+    let signing_db = manager.db().clone();
+    let agent: Box<dyn PromptAgent> = Box::new(MockAgent {
+        name: "MockModel".to_string(),
+        response: "OPTIMAL\n```lean:proof.lean\ntheorem fake : False := by sorry\n```".to_string(),
+    });
+    let (event_tx, mut event_rx) = mpsc::channel::<StreamEvent>(1000);
+    let (_control_tx, control_rx) = mpsc::channel::<ControlSignal>(100);
+    tokio::spawn(async move { while event_rx.recv().await.is_some() {} });
+    let omicron = Orchestrator::new(
+        manager,
+        vec![agent],
+        event_tx,
+        control_rx,
+        Some(workspace.clone()),
+    )
+    .await
+    .expect("create orchestrator");
+    let sigma = make_sigma("formal-failure");
+    {
+        let mut state = sigma.lock().await;
+        state.push_turn(Turn {
+            index: 0,
+            model_id: "User".into(),
+            content: "Prove the claim".into(),
+            timestamp: ConversationState::now(),
+            diffs: vec![],
+            certainty: Some(1.0),
+            outcome: TurnOutcome::Unknown,
+            task_category: None,
+            structure: None,
+            signature: vec![],
+            surprise_signal: None,
+            consistency_score: None,
+            diff_quality_score: None,
+            persona_disclosure: None,
+        });
+        state.iteration_index = 1;
+    }
+
+    let converged = omicron.run_turn(sigma.clone()).await.expect("turn failed");
+
+    let state = sigma.lock().await;
+    assert!(!converged, "failed verification must block convergence");
+    assert_eq!(state.turns.len(), 2);
+    assert_eq!(state.turns[1].outcome, TurnOutcome::VerificationFailed);
+    assert!(
+        !state.artifacts.contains_key("proof.lean"),
+        "a rejected proof must not remain in the active artifact set"
+    );
+    assert_eq!(state.verify_chain(), None);
+    let verifier = TurnVerifier::pinned(&signing_db)
+        .expect("read pinned signer")
+        .expect("pinned signer exists");
+    assert!(
+        verifier
+            .verify_turn(&state.turns[1])
+            .expect("verify finalized turn signature")
+    );
+    assert!(
+        !workspace.join("proof.lean").exists(),
+        "a rejected proof must also be removed from the workspace"
+    );
+    let bundle = dir.path().join("bundle");
+    InvestigationBundleExporter::export(&state, &bundle, BundleOptions::default())
+        .expect("export finalized bundle");
+    let verification = InvestigationBundleExporter::verify(&bundle).expect("verify bundle");
+    assert!(verification.passed, "{:?}", verification.issues);
+}
+
+#[tokio::test]
 async fn test_orchestrator_artifact_versioning() {
     let dir = tempdir().expect("temp dir");
     let manager = StateManager::new(dir.path().to_str().expect("path")).expect("state manager");
@@ -193,7 +285,8 @@ async fn test_orchestrator_artifact_versioning() {
         response: "Updated file:\n```rust:test.rs\nfn main() { println!(\"Updated\"); }\n```"
             .to_string(),
     });
-    let omicron = make_orchestrator(manager, vec![agent]).await;
+    let omicron =
+        make_orchestrator_in_workspace(manager, vec![agent], dir.path().join("workspace")).await;
     let sigma = make_sigma("test-session");
 
     // Two turns should increment artifact version

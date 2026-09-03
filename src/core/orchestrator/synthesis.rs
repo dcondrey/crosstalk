@@ -334,8 +334,15 @@ impl Orchestrator {
                         let event_tx = self.event_tx.clone();
                         let mut p_rx = paused_rx.clone();
                         let rate_limiter = Arc::clone(&self.rate_limiter);
+                        let budget_state = Arc::clone(sigma_lock);
 
                         tasks.push(async move {
+                            budget_state
+                                .lock()
+                                .await
+                                .budget
+                                .try_reserve_model_call((p.len() as u64).div_ceil(4))
+                                .map_err(anyhow::Error::msg)?;
                             rate_limiter.wait_for_permit(&agent_id).await;
                             let mut stream = agent
                                 .stream_prompt(&p)
@@ -357,6 +364,14 @@ impl Orchestrator {
                                 .await
                                 {
                                     Ok(Some(Ok(chunk))) => {
+                                        budget_state
+                                            .lock()
+                                            .await
+                                            .budget
+                                            .try_consume_output_tokens(
+                                                (chunk.len() as u64).div_ceil(4),
+                                            )
+                                            .map_err(anyhow::Error::msg)?;
                                         resp.push_str(&chunk);
                                         event_tx
                                             .send(StreamEvent::TokenReceived {

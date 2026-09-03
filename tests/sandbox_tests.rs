@@ -476,10 +476,9 @@ fn default_sandbox_config_has_reasonable_limits() {
 /// behavioural attempts failed to bite: synthetic busy loops get folded away by
 /// the optimiser, and a deliberately aged manager still runs fine under the old
 /// fixed deadline, which refutes the obvious "the budget is the manager's own
-/// age" reading. The verified causal handle is in
-/// docs/rule30/RESULTS-arm3-run1.md: forcing `--timeout-secs 1` on a real
-/// tournament reproduces the original divergence exactly, and raising it cures
-/// it. The mechanism behind the primary/reproduction asymmetry is still
+/// age" reading. The verified causal handle: forcing `--timeout-secs 1` on a
+/// real tournament reproduces the original divergence exactly, and raising it
+/// cures it. The mechanism behind the primary/reproduction asymmetry is still
 /// unexplained.
 #[tokio::test]
 async fn the_epoch_deadline_scales_with_the_configured_timeout() {

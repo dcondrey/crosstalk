@@ -27,6 +27,7 @@ fn checkpoint() -> String {
                 predicted_measurements: vec!["latency".into()],
                 kill_criteria: vec!["failed correctness".into()],
                 tags: BTreeSet::new(),
+                executable_contract: None,
             },
             fitness: Fitness {
                 novelty: 8.0,

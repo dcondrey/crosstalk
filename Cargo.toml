@@ -20,6 +20,10 @@ path = "src/main.rs"
 name = "crosstalk-lab"
 path = "src/bin/crosstalk-lab.rs"
 
+[[bin]]
+name = "crosstalk-worker"
+path = "src/bin/crosstalk-worker.rs"
+
 [dependencies]
 anyhow = "1.0.102"
 async-trait = "0.1.89"
@@ -47,7 +51,7 @@ regex = "1.11.1"
 rig-core = { version = "0.34.0", features = ["all"] }
 rustc-hash = "2.0.0"
 serde = { version = "1.0.228", features = ["derive", "rc"] }
-serde_json = "1.0.149"
+serde_json = { version = "1.0.149", features = ["float_roundtrip"] }
 serde_yaml = "0.9.34"
 sha2 = "0.10.8"
 similar = "3.0.0"

@@ -107,6 +107,34 @@ struct Args {
     #[arg(long, default_value_t = 900, value_name = "SECONDS")]
     evolve_timeout_secs: u64,
 
+    /// Hard cap for variation + critic model-call slots. Zero automatically
+    /// budgets two calls per requested candidate per generation.
+    #[arg(long, default_value_t = 0, value_name = "N")]
+    evolve_max_model_calls: u64,
+
+    /// Hard requirement applied to every evolved candidate. Repeat the flag to
+    /// provide multiple independent requirements.
+    #[arg(long = "evolve-constraint", value_name = "TEXT")]
+    evolve_constraints: Vec<String>,
+
+    /// A previously eliminated mechanism family. Separate structural features
+    /// with semicolons; repeat the flag for additional negative results.
+    #[arg(long = "evolve-exclusion", value_name = "FEATURES")]
+    evolve_exclusions: Vec<String>,
+
+    /// Hard post-initialization provider call limit, including failed attempts
+    /// and retries. Endpoint-validation pings currently occur before this ledger.
+    #[arg(long, default_value_t = 0, value_name = "N")]
+    max_model_calls: u64,
+
+    /// Hard session-wide estimated input-token limit. Zero means unlimited.
+    #[arg(long, default_value_t = 0, value_name = "N")]
+    max_input_tokens: u64,
+
+    /// Hard session-wide estimated streamed-output-token limit. Zero means unlimited.
+    #[arg(long, default_value_t = 0, value_name = "N")]
+    max_output_tokens: u64,
+
     /// Run without a terminal UI and write the final result to stdout.
     #[arg(long, default_value_t = false)]
     headless: bool,
@@ -122,6 +150,14 @@ struct Args {
     /// Verify an exported investigation bundle and exit without starting models.
     #[arg(long, value_name = "DIR")]
     verify_bundle: Option<PathBuf>,
+
+    /// Import a crosstalk.blindmind.v1 archive into a checkpoint and exit.
+    /// Prints the import summary; writes the checkpoint when --import-blindmind-out is given.
+    #[arg(long, value_name = "FILE")]
+    import_blindmind: Option<PathBuf>,
+
+    #[arg(long, value_name = "FILE", requires = "import_blindmind")]
+    import_blindmind_out: Option<PathBuf>,
 }
 
 fn lang_from_ext(path: &str) -> String {
@@ -403,6 +439,18 @@ async fn main() -> anyhow::Result<()> {
         return Ok(());
     }
 
+    if let Some(archive) = &args.import_blindmind {
+        let json = std::fs::read_to_string(archive)?;
+        let (state, summary) =
+            crosstalk::engines::idea_evolution::import_blindmind_archive(&json)
+                .map_err(anyhow::Error::msg)?;
+        if let Some(out) = &args.import_blindmind_out {
+            std::fs::write(out, state.checkpoint_json()?)?;
+        }
+        println!("{}", serde_json::to_string(&summary)?);
+        return Ok(());
+    }
+
     if !args.generate_completions.is_empty() {
         use clap::CommandFactory;
         use clap_complete::{Shell, generate};
@@ -587,6 +635,18 @@ async fn main() -> anyhow::Result<()> {
     } else {
         ConversationState::new(&session_id)
     }));
+    {
+        let mut state = sigma.lock().await;
+        if args.max_model_calls > 0 {
+            state.budget.max_model_calls = args.max_model_calls;
+        }
+        if args.max_input_tokens > 0 {
+            state.budget.max_input_tokens = args.max_input_tokens;
+        }
+        if args.max_output_tokens > 0 {
+            state.budget.max_output_tokens = args.max_output_tokens;
+        }
+    }
 
     // Cross-session tamper evidence: verify restored turns against the *pinned*
     // public key (no secret needed), so a swapped seed cannot mask a forgery.
@@ -809,83 +869,223 @@ async fn main() -> anyhow::Result<()> {
         request.population_size = args.evolve_population;
         request.generations = args.evolve_generations;
         request.max_concurrency = args.evolve_concurrency;
-        {
-            use sha2::{Digest, Sha256};
-            let state = sigma.lock().await;
-            request.evidence_ids = state.artifacts.keys().cloned().collect();
-            request.evidence_context = state
-                .artifacts
-                .iter()
-                .take(32)
-                .map(|(id, artifact)| {
-                    let end = artifact
-                        .content
-                        .floor_char_boundary(artifact.content.len().min(8_000));
-                    let sanitized = crosstalk::engines::security::InjectionShield::sanitize(
-                        &artifact.content[..end],
-                    );
-                    let sanitized_end = sanitized.floor_char_boundary(sanitized.len().min(8_000));
-                    let excerpt = sanitized[..sanitized_end].to_string();
-                    crosstalk::engines::idea_evolution::EvidenceExcerpt {
-                        id: id.clone(),
-                        content_sha256: format!(
-                            "{:x}",
-                            Sha256::digest(artifact.content.as_bytes())
-                        ),
-                        excerpt,
-                    }
-                })
-                .collect();
+        request.constraints = args.evolve_constraints.clone();
+        request.structural_exclusions = args
+            .evolve_exclusions
+            .iter()
+            .enumerate()
+            .map(
+                |(index, exclusion)| crosstalk_evolution::StructuralExclusion {
+                    id: format!("excluded-{}", index + 1),
+                    description: exclusion.clone(),
+                    structural_features: exclusion
+                        .split(';')
+                        .map(str::trim)
+                        .filter(|feature| !feature.is_empty())
+                        .map(str::to_string)
+                        .collect(),
+                    evidence_ids: vec![],
+                },
+            )
+            .collect();
+        let requested_model_call_slots = if args.evolve_max_model_calls == 0 {
+            (args.evolve_population as u64)
+                .saturating_mul(args.evolve_generations as u64)
+                .saturating_mul(2)
+        } else {
+            args.evolve_max_model_calls
+        };
+        request.max_model_call_slots = {
+            let mut state = sigma.lock().await;
+            state
+                .budget
+                .reserve_model_call_slots(requested_model_call_slots)
+        };
+        if request.max_model_call_slots < requested_model_call_slots {
+            tracing::warn!(
+                requested = requested_model_call_slots,
+                admitted = request.max_model_call_slots,
+                "native evolution was reduced by the shared session model-call limit"
+            );
         }
-        let variation_agent = agents[0].as_ref();
-        let critic_agent = agents
-            .get(1)
-            .map_or(variation_agent, |agent| agent.as_ref());
-        let evolution = tokio::time::timeout(
-            Duration::from_secs(args.evolve_timeout_secs.max(1)),
-            crosstalk::engines::idea_evolution::run_native_evolution_with_agents(
-                variation_agent,
-                critic_agent,
-                &request,
-                args.evolve_seed,
-            ),
-        )
-        .await;
-        match evolution {
-            Ok(Ok(outcome)) => {
-                outcome.response.validate().map_err(anyhow::Error::msg)?;
-                let candidates = serde_json::to_string_pretty(&outcome.response)?;
-                let reports = serde_json::to_string_pretty(&outcome.reports)?;
-                let mut state = sigma.lock().await;
-                state.ingest_file(
-                    "evolution/native-candidates.json".into(),
-                    "json".into(),
-                    candidates,
-                );
-                state.ingest_file(
-                    "evolution/checkpoint.json".into(),
-                    "json".into(),
-                    outcome.checkpoint_json,
-                );
-                state.ingest_file(
-                    "evolution/generation-reports.json".into(),
-                    "json".into(),
-                    reports,
-                );
-                tracing::info!(
-                    ideas = outcome.response.ideas.len(),
-                    variation_agent = variation_agent.name(),
-                    critic_agent = critic_agent.name(),
-                    "native evolution completed"
-                );
+        if request.max_model_call_slots < 2 {
+            let mut state = sigma.lock().await;
+            state
+                .budget
+                .release_unused_model_call_slots(request.max_model_call_slots);
+            tracing::warn!("native evolution skipped because fewer than two call slots remain");
+        } else {
+            {
+                use sha2::{Digest, Sha256};
+                let state = sigma.lock().await;
+                request.evidence_ids = state.artifacts.keys().cloned().collect();
+                request.evidence_context = state
+                    .artifacts
+                    .iter()
+                    .take(32)
+                    .map(|(id, artifact)| {
+                        let end = artifact
+                            .content
+                            .floor_char_boundary(artifact.content.len().min(8_000));
+                        let sanitized = crosstalk::engines::security::InjectionShield::sanitize(
+                            &artifact.content[..end],
+                        );
+                        let sanitized_end =
+                            sanitized.floor_char_boundary(sanitized.len().min(8_000));
+                        let excerpt = sanitized[..sanitized_end].to_string();
+                        crosstalk::engines::idea_evolution::EvidenceExcerpt {
+                            id: id.clone(),
+                            content_sha256: format!(
+                                "{:x}",
+                                Sha256::digest(artifact.content.as_bytes())
+                            ),
+                            excerpt,
+                        }
+                    })
+                    .collect();
             }
-            Ok(Err(error)) => {
-                tracing::warn!(%error, "native evolution failed; continuing without candidates")
+            let variation_agent = agents[0].as_ref();
+            let critic_agent = agents
+                .get(1)
+                .map_or(variation_agent, |agent| agent.as_ref());
+            let latest_evolution = Arc::new(std::sync::Mutex::new(None));
+            let progress_slot = Arc::clone(&latest_evolution);
+            let requested_generations = request.generations;
+            let evolution = tokio::time::timeout(
+                Duration::from_secs(args.evolve_timeout_secs.max(1)),
+                crosstalk::engines::idea_evolution::run_native_evolution_with_agents_reporting(
+                    variation_agent,
+                    critic_agent,
+                    &request,
+                    args.evolve_seed,
+                    move |progress| {
+                        print_status(&format!(
+                            "Native evolution generation {}/{} complete ({} survivor(s))...",
+                            progress.reports.len(),
+                            requested_generations,
+                            progress.response.ideas.len()
+                        ));
+                        if let Ok(mut latest) = progress_slot.lock() {
+                            *latest = Some(progress.clone());
+                        }
+                    },
+                ),
+            )
+            .await;
+            match evolution {
+                Ok(Ok(outcome)) => {
+                    let used_slots = outcome
+                        .reports
+                        .last()
+                        .map_or(0, |report| report.usage.model_call_slots_reserved);
+                    sigma.lock().await.budget.release_unused_model_call_slots(
+                        request.max_model_call_slots.saturating_sub(used_slots),
+                    );
+                    outcome.response.validate().map_err(anyhow::Error::msg)?;
+                    let candidates = serde_json::to_string_pretty(&outcome.response)?;
+                    let reports = serde_json::to_string_pretty(&outcome.reports)?;
+                    let status = serde_json::to_string_pretty(&serde_json::json!({
+                        "schema": "crosstalk.evolution.status.v1",
+                        "status": "completed",
+                        "requested_generations": request.generations,
+                        "completed_generations": outcome.reports.len(),
+                        "requested_model_call_slots": requested_model_call_slots,
+                        "admitted_model_call_slots": request.max_model_call_slots,
+                        "used_model_call_slots": used_slots,
+                        "survivors": outcome.response.ideas.len(),
+                    }))?;
+                    let mut state = sigma.lock().await;
+                    state.ingest_file(
+                        "evolution/native-candidates.json".into(),
+                        "json".into(),
+                        candidates,
+                    );
+                    state.ingest_file(
+                        "evolution/checkpoint.json".into(),
+                        "json".into(),
+                        outcome.checkpoint_json,
+                    );
+                    state.ingest_file(
+                        "evolution/generation-reports.json".into(),
+                        "json".into(),
+                        reports,
+                    );
+                    state.ingest_file("evolution/status.json".into(), "json".into(), status);
+                    tracing::info!(
+                        ideas = outcome.response.ideas.len(),
+                        variation_agent = variation_agent.name(),
+                        critic_agent = critic_agent.name(),
+                        "native evolution completed"
+                    );
+                }
+                Ok(Err(error)) => {
+                    let status = serde_json::to_string_pretty(&serde_json::json!({
+                        "schema": "crosstalk.evolution.status.v1",
+                        "status": "failed",
+                        "error": error,
+                        "requested_generations": request.generations,
+                        "completed_generations": 0,
+                        "requested_model_call_slots": requested_model_call_slots,
+                        "admitted_model_call_slots": request.max_model_call_slots,
+                    }))?;
+                    sigma.lock().await.ingest_file(
+                        "evolution/status.json".into(),
+                        "json".into(),
+                        status,
+                    );
+                    tracing::warn!(%error, "native evolution failed; continuing without candidates")
+                }
+                Err(_) => {
+                    let partial = latest_evolution
+                        .lock()
+                        .ok()
+                        .and_then(|latest| latest.clone());
+                    let completed_generations =
+                        partial.as_ref().map_or(0, |outcome| outcome.reports.len());
+                    let used_slots = partial
+                        .as_ref()
+                        .and_then(|outcome| outcome.reports.last())
+                        .map_or(request.max_model_call_slots, |report| {
+                            report.usage.model_call_slots_reserved
+                        });
+                    let status = serde_json::to_string_pretty(&serde_json::json!({
+                        "schema": "crosstalk.evolution.status.v1",
+                        "status": "timed_out",
+                        "timeout_seconds": args.evolve_timeout_secs,
+                        "requested_generations": request.generations,
+                        "completed_generations": completed_generations,
+                        "requested_model_call_slots": requested_model_call_slots,
+                        "admitted_model_call_slots": request.max_model_call_slots,
+                        "known_used_model_call_slots": used_slots,
+                        "partial_checkpoint_retained": partial.is_some(),
+                    }))?;
+                    let mut state = sigma.lock().await;
+                    if let Some(outcome) = partial {
+                        outcome.response.validate().map_err(anyhow::Error::msg)?;
+                        state.ingest_file(
+                            "evolution/native-candidates.json".into(),
+                            "json".into(),
+                            serde_json::to_string_pretty(&outcome.response)?,
+                        );
+                        state.ingest_file(
+                            "evolution/checkpoint.json".into(),
+                            "json".into(),
+                            outcome.checkpoint_json,
+                        );
+                        state.ingest_file(
+                            "evolution/generation-reports.json".into(),
+                            "json".into(),
+                            serde_json::to_string_pretty(&outcome.reports)?,
+                        );
+                    }
+                    state.ingest_file("evolution/status.json".into(), "json".into(), status);
+                    tracing::warn!(
+                        timeout_secs = args.evolve_timeout_secs,
+                        completed_generations,
+                        "native evolution timed out; retained completed progress"
+                    );
+                }
             }
-            Err(_) => tracing::warn!(
-                timeout_secs = args.evolve_timeout_secs,
-                "native evolution timed out; continuing without candidates"
-            ),
         }
     }
 
@@ -1206,13 +1406,28 @@ async fn main() -> anyhow::Result<()> {
                 output_dir,
                 crosstalk::engines::investigation_bundle::BundleOptions::default(),
             )?;
+        let verification =
+            crosstalk::engines::investigation_bundle::InvestigationBundleExporter::verify(
+                output_dir,
+            )?;
+        if !verification.passed {
+            anyhow::bail!(
+                "newly exported investigation bundle failed verification: {}",
+                verification.issues.join("; ")
+            );
+        }
         eprintln!(
-            "Investigation bundle: {} (audit={}, files={})",
+            "Investigation bundle: {} (integrity={}, scientific_release={}, files={})",
             output_dir.display(),
-            if manifest.audit.passed {
-                "PASS"
+            if verification.passed { "PASS" } else { "FAIL" },
+            if manifest
+                .scientific_release
+                .as_ref()
+                .is_some_and(|assessment| assessment.eligible)
+            {
+                "ELIGIBLE"
             } else {
-                "FAIL"
+                "NOT_ESTABLISHED"
             },
             manifest.files.len()
         );
@@ -1221,11 +1436,29 @@ async fn main() -> anyhow::Result<()> {
     if args.headless {
         let state = sigma.lock().await;
         let audit = state.investigation.audit(&state.claim_ledger);
-        let final_response = state
+        let scientific_release = state
+            .investigation
+            .scientific_release_assessment(&state.claim_ledger);
+        let release_warning = scientific_release.unverified_warning();
+        let latest_attempt = state
             .turns
             .iter()
             .rev()
             .find(|turn| turn.model_id != "User")
+            .map(|turn| format!("{:?}", turn.outcome));
+        let final_response = state
+            .turns
+            .iter()
+            .rev()
+            .find(|turn| {
+                turn.model_id != "User"
+                    && !matches!(
+                        turn.outcome,
+                        TurnOutcome::Rejected
+                            | TurnOutcome::RolledBack
+                            | TurnOutcome::VerificationFailed
+                    )
+            })
             .map(|turn| turn.content.as_str())
             .unwrap_or("");
         match args.headless_format {
@@ -1236,9 +1469,17 @@ async fn main() -> anyhow::Result<()> {
                         "schema": "crosstalk.headless.v1",
                         "session_id": state.session_id,
                         "final_response": final_response,
+                        "latest_attempt_outcome": latest_attempt.as_deref(),
                         "completion_probability": state.completion_probability,
                         "chain_head": state.chain_head_hex(),
                         "audit": audit,
+                        "scientific_release": scientific_release,
+                        "result_status": if scientific_release.eligible {
+                            "established"
+                        } else {
+                            "unverified_model_synthesis"
+                        },
+                        "release_warning": release_warning,
                         "artifact_names": state.artifacts.keys().collect::<Vec<_>>(),
                     }))?
                 );
@@ -1247,14 +1488,36 @@ async fn main() -> anyhow::Result<()> {
                 println!("# Crosstalk result\n");
                 println!("- Session: `{}`", state.session_id);
                 println!(
-                    "- Evidence-chain audit: **{}**",
+                    "- Latest attempt outcome: `{}`",
+                    latest_attempt.as_deref().unwrap_or("none")
+                );
+                println!(
+                    "- Evidence integrity audit: **{}**",
                     if audit.passed { "PASS" } else { "FAIL" }
                 );
                 println!(
                     "- Verification coverage: {:.1}%\n",
                     audit.verification_coverage * 100.0
                 );
-                println!("## Result\n\n{final_response}");
+                println!(
+                    "- Scientific release: **{}**\n",
+                    if scientific_release.eligible {
+                        "ELIGIBLE"
+                    } else {
+                        "NOT ESTABLISHED"
+                    }
+                );
+                if let Some(warning) = &release_warning {
+                    println!("> [!WARNING]\n> {warning}\n");
+                }
+                println!(
+                    "## {}\n\n{final_response}",
+                    if scientific_release.eligible {
+                        "Established result"
+                    } else {
+                        "Unverified synthesis"
+                    }
+                );
             }
         }
     }

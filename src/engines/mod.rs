@@ -25,6 +25,7 @@ pub mod reasoning;
 pub mod release;
 pub mod research;
 pub mod sandbox;
+pub mod sealed_evaluation;
 pub mod security;
 pub mod self_improvement;
 pub mod simulation;

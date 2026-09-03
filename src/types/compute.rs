@@ -26,6 +26,8 @@ pub struct CostEntry {
     pub turn_id: u32,
     pub model_id: String,
     pub usage: TokenUsage,
+    /// Provider-reported or explicitly configured cost. Zero means unknown;
+    /// Crosstalk never invents a nominal price for an unmetered response.
     pub cost_usd: f64,
     pub latency_ms: u64,
     pub timestamp: u64,
@@ -37,6 +39,20 @@ pub struct BudgetLedger {
     pub session_budget: f64,
     pub spent: f64,
     pub entries: Vec<CostEntry>,
+    /// Hard ceilings. Zero means unlimited.
+    #[serde(default)]
+    pub max_model_calls: u64,
+    #[serde(default)]
+    pub max_input_tokens: u64,
+    #[serde(default)]
+    pub max_output_tokens: u64,
+    /// Conservatively metered usage, including failed/retried calls.
+    #[serde(default)]
+    pub model_calls: u64,
+    #[serde(default)]
+    pub estimated_input_tokens: u64,
+    #[serde(default)]
+    pub estimated_output_tokens: u64,
 }
 
 impl BudgetLedger {
@@ -89,13 +105,82 @@ impl BudgetLedger {
 
     pub fn summary(&self) -> String {
         format!(
-            "budget={:.4} spent={:.4} remaining={:.4} burn_rate={:.6} mode={:?}",
+            "budget={:.4} spent={:.4} remaining={:.4} burn_rate={:.6} mode={:?} calls={}/{} input_tokens={}/{} output_tokens={}/{}",
             self.session_budget,
             self.spent,
             self.remaining(),
             self.burn_rate(),
-            self.mode()
+            self.mode(),
+            self.model_calls,
+            display_limit(self.max_model_calls),
+            self.estimated_input_tokens,
+            display_limit(self.max_input_tokens),
+            self.estimated_output_tokens,
+            display_limit(self.max_output_tokens),
         )
+    }
+
+    /// Reserve a provider call before it starts. Failed attempts and retries
+    /// remain charged because they consumed rate-limit and compute capacity.
+    pub fn try_reserve_model_call(&mut self, estimated_input_tokens: u64) -> Result<(), String> {
+        if self.max_model_calls > 0 && self.model_calls >= self.max_model_calls {
+            return Err("session model-call limit exhausted".into());
+        }
+        if self.max_input_tokens > 0
+            && self
+                .estimated_input_tokens
+                .saturating_add(estimated_input_tokens)
+                > self.max_input_tokens
+        {
+            return Err("session input-token limit exhausted".into());
+        }
+        self.model_calls = self.model_calls.saturating_add(1);
+        self.estimated_input_tokens = self
+            .estimated_input_tokens
+            .saturating_add(estimated_input_tokens);
+        Ok(())
+    }
+
+    /// Reserve several model-call slots for a bounded subsystem such as native
+    /// evolution. Returns the admitted count, which may be lower than
+    /// requested when a hard session limit is configured.
+    pub fn reserve_model_call_slots(&mut self, requested: u64) -> u64 {
+        let admitted = if self.max_model_calls == 0 {
+            requested
+        } else {
+            requested.min(self.max_model_calls.saturating_sub(self.model_calls))
+        };
+        self.model_calls = self.model_calls.saturating_add(admitted);
+        admitted
+    }
+
+    pub fn release_unused_model_call_slots(&mut self, unused: u64) {
+        self.model_calls = self.model_calls.saturating_sub(unused);
+    }
+
+    /// Charge streamed output incrementally so concurrent agents cannot each
+    /// assume they own the same remaining allowance.
+    pub fn try_consume_output_tokens(&mut self, estimated_tokens: u64) -> Result<(), String> {
+        if self.max_output_tokens > 0
+            && self
+                .estimated_output_tokens
+                .saturating_add(estimated_tokens)
+                > self.max_output_tokens
+        {
+            return Err("session output-token limit exhausted".into());
+        }
+        self.estimated_output_tokens = self
+            .estimated_output_tokens
+            .saturating_add(estimated_tokens);
+        Ok(())
+    }
+}
+
+fn display_limit(value: u64) -> String {
+    if value == 0 {
+        "unlimited".into()
+    } else {
+        value.to_string()
     }
 }
 

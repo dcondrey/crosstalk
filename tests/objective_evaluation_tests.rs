@@ -27,6 +27,7 @@ fn spec(reproduce: bool) -> EvaluationSpec {
         deterministic: true,
         independent_reproduction_required: reproduce,
         reproduction_evaluator_id: reproduce.then(|| "counting-reproduction".into()),
+        distinct_attestation_keys_required: false,
     }
 }
 
@@ -133,6 +134,7 @@ async fn wasm_function_evaluator_commits_to_cases_without_exposing_them() {
         deterministic: true,
         independent_reproduction_required: false,
         reproduction_evaluator_id: None,
+        distinct_attestation_keys_required: false,
     };
     let result = registry
         .evaluate("hidden-i64", &specification, &candidate)

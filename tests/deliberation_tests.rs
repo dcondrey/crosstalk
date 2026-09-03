@@ -2,12 +2,13 @@ use crosstalk::engines::deliberation::{DeliberationProtocol, ReasoningDomain, cl
 use crosstalk::engines::formal_verification::{FormalProofVerifier, ProofBackend, ProofStatus};
 use crosstalk::engines::idea_evolution::{
     BLINDMIND_CONTRACT_VERSION, EvolutionRequest, EvolutionResponse, EvolvedIdea,
+    import_blindmind_archive,
 };
 use crosstalk::types::epistemics::{
     Claim, ClaimEdge, ClaimKind, ClaimLedger, ClaimRelation, ClaimStatus, EvidenceRef,
 };
 use crosstalk::types::mode::ModeDefinition;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 #[test]
 fn routes_domain_general_tasks() {
@@ -162,6 +163,7 @@ fn blindmind_contract_rejects_score_inflation_and_empty_mechanisms() {
     let response = EvolutionResponse {
         schema: BLINDMIND_CONTRACT_VERSION.into(),
         project: "discovery".into(),
+        directive: "invent".into(),
         ideas: vec![EvolvedIdea {
             id: "idea-1".into(),
             parent_ids: vec![],
@@ -171,7 +173,11 @@ fn blindmind_contract_rejects_score_inflation_and_empty_mechanisms() {
             mechanism: "A testable interaction".into(),
             predicted_measurements: vec!["signal exceeds control by 3 sigma".into()],
             kill_criteria: vec!["no signal in preregistered test".into()],
+            generation: 0,
+            tags: BTreeSet::new(),
             external_scores: BTreeMap::from([("novelty".into(), 11.0)]),
+            executable_contract: None,
+            objectively_verified: false,
         }],
     };
     assert!(response.validate().is_err());
@@ -193,4 +199,25 @@ fn blindmind_v1_requests_without_new_optional_fields_remain_compatible() {
     assert_eq!(request.max_concurrency, 4);
     assert!(request.evidence_context.is_empty());
     request.validate().unwrap();
+}
+
+#[test]
+fn blindmind_archive_import_rejects_a_dangling_parent_reference() {
+    let json = r#"{
+        "schema": "crosstalk.blindmind.v1",
+        "project": "riemann",
+        "directive": "",
+        "ideas": [
+            {"id": "seed-1", "generation": 0, "parent_ids": [], "mutation_type": "Wildcard",
+             "domain": "Mathematics", "title": "Seed", "mechanism": "A stated mechanism",
+             "external_scores": {}, "objectively_verified": false},
+            {"id": "child-1", "generation": 1, "parent_ids": ["seed-1", "ghost-9"],
+             "mutation_type": "Crossover", "domain": "Mathematics", "title": "Child",
+             "mechanism": "A derived mechanism", "external_scores": {},
+             "objectively_verified": false}
+        ]
+    }"#;
+
+    let error = import_blindmind_archive(json).expect_err("dangling parent must not import");
+    assert!(error.contains("ghost-9"), "unexpected rejection: {error}");
 }

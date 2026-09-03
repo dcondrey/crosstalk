@@ -3,6 +3,18 @@ use crosstalk::types::conversation::ConversationState;
 use std::process::Command;
 
 #[test]
+fn help_exposes_constraints_and_structural_eliminations() {
+    let output = Command::new(env!("CARGO_BIN_EXE_crosstalk"))
+        .arg("--help")
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let help = String::from_utf8_lossy(&output.stdout);
+    assert!(help.contains("--evolve-constraint"));
+    assert!(help.contains("--evolve-exclusion"));
+}
+
+#[test]
 fn verify_bundle_cli_is_provider_free_and_machine_readable() {
     let temp = tempfile::tempdir().unwrap();
     let bundle = temp.path().join("bundle");

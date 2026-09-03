@@ -135,9 +135,9 @@ impl ChallengeFile {
         match self.max_candidate_bytes {
             None => Ok(MAX_WASM_BYTES),
             Some(0) => bail!("max_candidate_bytes must be greater than zero"),
-            Some(cap) if cap > MAX_WASM_BYTES => bail!(
-                "max_candidate_bytes {cap} exceeds the transport limit {MAX_WASM_BYTES}"
-            ),
+            Some(cap) if cap > MAX_WASM_BYTES => {
+                bail!("max_candidate_bytes {cap} exceeds the transport limit {MAX_WASM_BYTES}")
+            }
             Some(cap) => Ok(cap),
         }
     }

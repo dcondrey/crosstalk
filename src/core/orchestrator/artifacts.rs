@@ -494,7 +494,10 @@ impl Orchestrator {
                     output_tokens: response.len() as u32 / 4,
                     total_tokens: (prompt.len() + response.len()) as u32 / 4,
                 },
-                cost_usd: 0.01,
+                // PromptAgent currently exposes text but not provider billing
+                // metadata. Record unknown cost as zero instead of fabricating
+                // a nominal value.
+                cost_usd: 0.0,
                 latency_ms,
                 timestamp: turn.timestamp,
             },
@@ -632,10 +635,7 @@ impl Orchestrator {
             evolver.seed_from_successful_turn(prompt, seed_cat);
         }
 
-        if matches!(
-            turn_outcome,
-            TurnOutcome::TestsPassed | TurnOutcome::Compiled
-        ) {
+        if turn_outcome == TurnOutcome::TestsPassed {
             for (name, artifact) in &sigma.artifacts {
                 if let Ok(improved) =
                     crate::engines::self_improvement::SelfCodeModifier::propose_improvement(
@@ -974,9 +974,13 @@ impl Orchestrator {
 
         if let Err(e) = InvariantChecker::check_all(&sigma) {
             sigma.artifacts = artifact_snapshot;
-            if let Some(t) = sigma.turns.last_mut() {
-                t.outcome = TurnOutcome::RolledBack;
-            }
+            turn.outcome = TurnOutcome::RolledBack;
+            turn.signature.clear();
+            let serialized = serde_json::to_vec(&turn)?;
+            turn.signature = self.signer.sign(&serialized);
+            sigma
+                .replace_last_turn(turn.clone())
+                .map_err(anyhow::Error::msg)?;
             let should_skip = {
                 let mut counters = self.rollback_counters.lock().await;
                 let count = counters.entry(agent_id.to_string()).or_insert(0);
@@ -1001,7 +1005,6 @@ impl Orchestrator {
                 let mut skips = self.skip_until.lock().await;
                 skips.insert(agent_id.to_string(), sigma.iteration_index + 1);
             }
-            turn.outcome = TurnOutcome::RolledBack;
             {
                 let intell = self.intelligence.lock().await;
                 intell.update_profile_with_latency(&turn, 0.0, latency_ms);
@@ -1010,6 +1013,19 @@ impl Orchestrator {
                 let mut ctx = self.session_ctx.lock().await;
                 ctx.record_turn(TurnOutcome::RolledBack);
             }
+            let previous_hash = sigma.state_hash;
+            sigma.state_hash = HashChain::compute(&sigma, &previous_hash)?;
+            if let Some(principal_id) = sigma.principal_id.as_deref() {
+                let event = DecisionLedger::commit_turn(&turn, &sigma.state_hash, agent_id);
+                DecisionLedger::persist(
+                    self.state_manager.db(),
+                    &sigma.session_id,
+                    principal_id,
+                    turn.index,
+                    &event,
+                )?;
+            }
+            self.state_manager.checkpoint_async(&sigma).await?;
             return Ok(None);
         }
         {
@@ -1064,6 +1080,7 @@ impl Orchestrator {
         &self,
         sigma_lock: &Mutex<ConversationState>,
         mut turn: Turn,
+        artifact_snapshot: BTreeMap<String, Arc<Artifact>>,
         quality_score: f64,
         next_p: f64,
         agent_id: &str,
@@ -1088,9 +1105,12 @@ impl Orchestrator {
             (io, all, diffs)
         };
 
+        let mut write_failed = false;
+        let mut written_paths = Vec::new();
         for (name, artifact) in &io_artifacts {
             match self.file_writer.write_artifact_with_proof(artifact).await {
                 Ok(WriteOutcome::Written(path)) => {
+                    written_paths.push((name.clone(), path.clone()));
                     self.emit(StreamEvent::TokenReceived {
                         agent_id: "System".to_string(),
                         token: format!("[write] {}\n", path.display()),
@@ -1099,6 +1119,7 @@ impl Orchestrator {
                 }
                 Ok(WriteOutcome::Skipped(_)) => {}
                 Ok(WriteOutcome::VerificationFailed(stderr)) => {
+                    write_failed = true;
                     self.emit(StreamEvent::TokenReceived {
                         agent_id: "System".to_string(),
                         token: format!(
@@ -1108,6 +1129,7 @@ impl Orchestrator {
                     .await?;
                 }
                 Err(e) => {
+                    write_failed = true;
                     self.emit(StreamEvent::TokenReceived {
                         agent_id: "System".to_string(),
                         token: format!("[write] error writing {name}: {e}\n"),
@@ -1139,15 +1161,99 @@ impl Orchestrator {
             })
             .await?;
         }
-        if !verification_results.is_empty() && verification_results.iter().all(|(_, _, p)| *p) {
+        let verification_failed =
+            write_failed || verification_results.iter().any(|(_, _, passed)| !*passed);
+        let verification_passed = !verification_results.is_empty() && !verification_failed;
+        let provisional_outcome = turn.outcome;
+        if verification_failed {
+            turn.outcome = TurnOutcome::VerificationFailed;
+        } else if verification_passed {
             turn.outcome = TurnOutcome::TestsPassed;
-            let current_p = f64::from_bits(self.completion_probability.load(Ordering::Acquire));
-            self.completion_probability
-                .store((current_p + 0.15).min(1.0).to_bits(), Ordering::Release);
+        }
+
+        let finalized_p = if verification_failed {
+            (next_p * 0.5).min(0.85)
+        } else if verification_passed {
+            (next_p + 0.15).min(1.0)
+        } else {
+            next_p
+        };
+        self.completion_probability
+            .store(finalized_p.to_bits(), Ordering::Release);
+
+        if turn.outcome != provisional_outcome {
+            turn.signature.clear();
+            let serialized = serde_json::to_vec(&turn)?;
+            turn.signature = self.signer.sign(&serialized);
+        }
+
+        if verification_failed {
+            {
+                let mut failures = self.verification_failures.lock().await;
+                let count = failures.entry(agent_id.to_string()).or_insert(0);
+                *count += 1;
+            }
+
+            // Restore the exact files that this provisional turn wrote. Paths
+            // come from FileWriter only after its canonical-root safety check.
+            let mut rollback_errors = Vec::new();
+            for (name, path) in written_paths.iter().rev() {
+                let proof_path = path.with_extension(format!(
+                    "{}.proof",
+                    path.extension()
+                        .and_then(|extension| extension.to_str())
+                        .unwrap_or("txt")
+                ));
+                if tokio::fs::try_exists(&proof_path).await.unwrap_or(false)
+                    && let Err(error) = tokio::fs::remove_file(&proof_path).await
+                {
+                    tracing::warn!(%error, file = %proof_path.display(), "failed to remove rejected proof sidecar");
+                    rollback_errors.push(format!("{}: {error}", proof_path.display()));
+                }
+                if let Some(original) = artifact_snapshot.get(name) {
+                    if let Err(error) = self.file_writer.write_artifact_with_proof(original).await {
+                        tracing::error!(%error, artifact = %name, "failed to restore pre-verification artifact");
+                        rollback_errors.push(format!("{name}: {error}"));
+                    }
+                } else if tokio::fs::try_exists(path).await.unwrap_or(false)
+                    && let Err(error) = tokio::fs::remove_file(path).await
+                {
+                    tracing::error!(%error, file = %path.display(), "failed to remove rejected new artifact");
+                    rollback_errors.push(format!("{}: {error}", path.display()));
+                }
+            }
+            if !rollback_errors.is_empty() {
+                self.emit(StreamEvent::Error(format!(
+                    "verification failed and workspace rollback was incomplete: {}",
+                    rollback_errors.join("; ")
+                )))
+                .await?;
+            }
         }
 
         // Re-acquire lock for remaining state updates.
         let mut sigma = sigma_lock.lock().await;
+        if verification_failed {
+            // Verification is transactional: rejected artifacts remain in the
+            // attempted turn's diff, but cannot become inputs to later turns.
+            sigma.artifacts = artifact_snapshot;
+        }
+        sigma.completion_probability = finalized_p;
+        if turn.outcome != provisional_outcome {
+            sigma
+                .replace_last_turn(turn.clone())
+                .map_err(anyhow::Error::msg)?;
+        }
+        // Close the provisional-turn transaction from the actual retained
+        // transcript, even when an earlier phase already supplied a failure
+        // outcome. This prevents a provisional signature/hash from surviving
+        // merely because the enum value did not change in this phase.
+        sigma.rebuild_turn_hashes();
+        if let Some(index) = sigma.verify_chain() {
+            return Err(anyhow::anyhow!(
+                "failed to finalize transcript chain at retained index {index}"
+            ));
+        }
         sigma.last_verification = verification_results
             .iter()
             .map(|(name, output, passed)| (name.clone(), output.clone(), *passed))
@@ -1173,6 +1279,19 @@ impl Orchestrator {
             let prev = sigma.state_hash;
             sigma.state_hash = HashChain::compute(&sigma, &prev)?;
         }
+        if turn.outcome != provisional_outcome
+            && let Some(principal_id) = sigma.principal_id.as_deref()
+        {
+            let event = DecisionLedger::commit_turn(&turn, &sigma.state_hash, agent_id);
+            DecisionLedger::persist(
+                self.state_manager.db(),
+                &sigma.session_id,
+                principal_id,
+                turn.index,
+                &event,
+            )?;
+        }
+        self.state_manager.checkpoint_async(&sigma).await?;
 
         if let Some(ref auditor_tx) = self.auditor_tx
             && !auditor_tx.is_closed()
@@ -1219,7 +1338,7 @@ impl Orchestrator {
             agent_id: "System".to_string(),
             token: format!(
                 "\n[Turn Complete | P(C): {:.2} | Hash: {:02x?}]\n",
-                next_p,
+                finalized_p,
                 &sigma.state_hash[..4]
             ),
         })
@@ -1265,7 +1384,7 @@ impl Orchestrator {
                     tests_passed: turn.outcome == TurnOutcome::TestsPassed,
                     quality_delta: 0.0,
                     was_rolled_back: false,
-                    convergence_contribution: next_p,
+                    convergence_contribution: finalized_p,
                 }),
                 is_negative: false,
             };
@@ -1274,23 +1393,23 @@ impl Orchestrator {
             bridge.push_record(&session_id, record);
         }
 
-        if next_p > 0.70 && next_p <= 0.85 {
+        if finalized_p > 0.70 && finalized_p <= 0.85 {
             self.emit(StreamEvent::TokenReceived {
                 agent_id: "System".to_string(),
                 token: format!(
-                    "[convergence] p={next_p:.2}, moderate confidence, continuing refinement"
+                    "[convergence] p={finalized_p:.2}, moderate confidence, continuing refinement"
                 ),
             })
             .await?;
-        } else if next_p > 0.85 && next_p <= 0.95 {
+        } else if finalized_p > 0.85 && finalized_p <= 0.95 {
             self.emit(StreamEvent::TokenReceived {
                 agent_id: "System".to_string(),
-                token: format!("[convergence] p={next_p:.2}, high confidence, final polish"),
+                token: format!("[convergence] p={finalized_p:.2}, high confidence, final polish"),
             })
             .await?;
         }
 
-        let is_converged = next_p > 0.95;
+        let is_converged = finalized_p > 0.95 && !verification_failed;
         if is_converged {
             let eval = SelfImprovementEngine::evaluate_session(&sigma);
             let report = AnalyticsEngine::generate_report(&sigma);
@@ -1338,7 +1457,7 @@ impl Orchestrator {
         nash_weight_updates: BTreeMap<String, f64>,
         stall_risk: f64,
     ) -> Result<bool> {
-        let Some((turn, quality_score, _certainty, _surprise, _current_i, _artifact_snapshot)) =
+        let Some((turn, quality_score, _certainty, _surprise, _current_i, artifact_snapshot)) =
             self.apply_turn_to_state(
                 sigma_lock,
                 changes,
@@ -1361,6 +1480,7 @@ impl Orchestrator {
         self.finalize_committed_turn(
             sigma_lock,
             turn,
+            artifact_snapshot,
             quality_score,
             next_p,
             agent_id,

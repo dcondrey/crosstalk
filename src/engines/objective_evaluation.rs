@@ -51,6 +51,10 @@ pub struct EvaluationSpec {
     /// reproduction is required.
     #[serde(default)]
     pub reproduction_evaluator_id: Option<String>,
+    /// Require primary and reproduction runs to be signed by distinct pinned
+    /// worker identities. This is stronger than distinct evaluator labels.
+    #[serde(default)]
+    pub distinct_attestation_keys_required: bool,
 }
 
 impl EvaluationSpec {
@@ -140,6 +144,11 @@ impl EvaluationSpec {
         if !self.independent_reproduction_required && self.reproduction_evaluator_id.is_some() {
             return Err(EvaluationError::InvalidSpec(
                 "a reproduction evaluator requires independent reproduction".into(),
+            ));
+        }
+        if self.distinct_attestation_keys_required && !self.independent_reproduction_required {
+            return Err(EvaluationError::InvalidSpec(
+                "distinct attestation keys require independent reproduction".into(),
             ));
         }
         Ok(())
@@ -440,6 +449,12 @@ pub trait ObjectiveEvaluator: Send + Sync {
         None
     }
 
+    /// Pinned signing-key fingerprint for an evaluator that returns
+    /// cryptographically attested results.
+    fn attestation_key_sha256(&self) -> Option<&str> {
+        None
+    }
+
     async fn evaluate(
         &self,
         spec: &EvaluationSpec,
@@ -516,6 +531,18 @@ impl EvaluatorRegistry {
                 "result candidate identity or digest mismatch".into(),
             ));
         }
+        if let Some(expected_key) = evaluator.attestation_key_sha256() {
+            validate_sha256(expected_key, "attestation key")?;
+            if result
+                .environment
+                .get("sealed_worker_key_sha256")
+                .is_none_or(|actual| !actual.eq_ignore_ascii_case(expected_key))
+            {
+                return Err(EvaluationError::MalformedResult(
+                    "result does not carry the evaluator's pinned attestation key".into(),
+                ));
+            }
+        }
         Ok(result)
     }
 
@@ -544,6 +571,33 @@ impl EvaluatorRegistry {
             return Err(EvaluationError::InvalidSpec(
                 "primary and reproduction evaluator identities must differ".into(),
             ));
+        }
+        if spec.distinct_attestation_keys_required {
+            let primary_key = self
+                .evaluators
+                .get(evaluator_id)
+                .and_then(|evaluator| evaluator.attestation_key_sha256())
+                .ok_or_else(|| {
+                    EvaluationError::InvalidSpec(format!(
+                        "evaluator {evaluator_id} has no pinned attestation key"
+                    ))
+                })?;
+            let reproduction_key = self
+                .evaluators
+                .get(reproduction_evaluator_id)
+                .and_then(|evaluator| evaluator.attestation_key_sha256())
+                .ok_or_else(|| {
+                    EvaluationError::InvalidSpec(format!(
+                        "evaluator {reproduction_evaluator_id} has no pinned attestation key"
+                    ))
+                })?;
+            validate_sha256(primary_key, "primary attestation key")?;
+            validate_sha256(reproduction_key, "reproduction attestation key")?;
+            if primary_key.eq_ignore_ascii_case(reproduction_key) {
+                return Err(EvaluationError::InvalidSpec(
+                    "primary and reproduction evaluators must use distinct attestation keys".into(),
+                ));
+            }
         }
         let mut reproduction = self
             .evaluate(reproduction_evaluator_id, spec, candidate)

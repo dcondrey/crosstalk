@@ -570,6 +570,7 @@ impl Orchestrator {
             let event_tx = self.event_tx.clone();
             let mut p_rx = paused_rx.clone();
             let rate_limiter = Arc::clone(&self.rate_limiter);
+            let budget_state = Arc::clone(sigma_lock);
 
             let divergent_supplement = if is_divergent {
                 if let Some(hash_pos) = agent_id.find('#') {
@@ -606,12 +607,39 @@ impl Orchestrator {
                         delay_ms = (delay_ms * 2).min(30_000);
                     }
 
+                    {
+                        let estimated_input = (agent_prompt.len() as u64).div_ceil(4);
+                        budget_state
+                            .lock()
+                            .await
+                            .budget
+                            .try_reserve_model_call(estimated_input)
+                            .map_err(anyhow::Error::msg)?;
+                    }
                     rate_limiter.wait_for_permit(&agent_id).await;
                     let mut stream = match agent.stream_prompt(&agent_prompt).await {
                         Ok(s) => s,
                         Err(e) => {
                             tracing::info!(agent = %agent_id, "local inference failed, attempting remote MCP fallback");
+                            {
+                                let estimated_input =
+                                    (agent_prompt.len() as u64).div_ceil(4);
+                                budget_state
+                                    .lock()
+                                    .await
+                                    .budget
+                                    .try_reserve_model_call(estimated_input)
+                                    .map_err(anyhow::Error::msg)?;
+                            }
                             if let Ok(remote_res) = McpGateway::remote_sampling(&agent_prompt, &agent_id).await {
+                                budget_state
+                                    .lock()
+                                    .await
+                                    .budget
+                                    .try_consume_output_tokens(
+                                        (remote_res.len() as u64).div_ceil(4),
+                                    )
+                                    .map_err(anyhow::Error::msg)?;
                                 return Ok((agent_id, remote_res));
                             }
                             let e = anyhow::anyhow!("Agent {agent_id} failure: {e:?}");
@@ -641,6 +669,14 @@ impl Orchestrator {
                         match tokio::time::timeout(std::time::Duration::from_secs(120), stream.next()).await {
                             Err(_) => return Err(anyhow::anyhow!("Agent {agent_id} timed out waiting for response")),
                             Ok(Some(Ok(chunk))) => {
+                                budget_state
+                                    .lock()
+                                    .await
+                                    .budget
+                                    .try_consume_output_tokens(
+                                        (chunk.len() as u64).div_ceil(4),
+                                    )
+                                    .map_err(anyhow::Error::msg)?;
                                 response.push_str(&chunk);
                                 event_tx
                                     .send(StreamEvent::TokenReceived { agent_id: agent_id.clone(), token: chunk })

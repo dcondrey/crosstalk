@@ -110,6 +110,29 @@ fn accepting_formal_verification_promotes_claim_and_passes_audit() {
     assert!(audit.passed, "{:?}", audit.issues);
     assert_eq!(audit.verified_claims, 1);
     assert_eq!(audit.verification_coverage, 1.0);
+    let release = investigation.scientific_release_assessment(&claims);
+    assert!(release.eligible, "{:?}", release.blocking_reasons);
+}
+
+#[test]
+fn integrity_pass_without_verified_claims_is_not_scientific_release() {
+    let investigation = Investigation::new("case", "Unverified result");
+    let claims = ClaimLedger::default();
+
+    let audit = investigation.audit(&claims);
+    let release = investigation.scientific_release_assessment(&claims);
+
+    assert!(audit.passed);
+    assert!(!release.eligible);
+    assert!(
+        release
+            .blocking_reasons
+            .iter()
+            .any(|reason| reason.contains("no explicit fact or inference"))
+    );
+    let warning = release.unverified_warning().unwrap();
+    assert!(warning.contains("Unverified model synthesis"));
+    assert!(warning.contains("do not by themselves establish universal claims"));
 }
 
 #[test]

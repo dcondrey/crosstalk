@@ -1,7 +1,7 @@
 //! Reproducible, content-addressed export for a completed investigation.
 
 use crate::types::conversation::ConversationState;
-use crate::types::investigation::ChainOfEvidenceAudit;
+use crate::types::investigation::{ChainOfEvidenceAudit, ScientificReleaseAssessment};
 use anyhow::{Context, Result, anyhow};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -10,6 +10,7 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 
 pub const BUNDLE_SCHEMA: &str = "crosstalk.bundle.v1";
+pub const REPORT_SCHEMA: &str = "crosstalk.report.v2";
 const MAX_MANIFEST_BYTES: u64 = 4 * 1024 * 1024;
 const MAX_STATE_BYTES: usize = 256 * 1024 * 1024;
 
@@ -29,7 +30,14 @@ pub struct BundleManifest {
     pub transcript_chain_head: String,
     pub state_sha256: String,
     pub investigation_schema: String,
+    /// Identifies the deterministic report renderer. Legacy v1 manifests did
+    /// not carry this field, so their report is integrity-checked by its
+    /// manifest hash without re-rendering it through newer presentation code.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub report_schema: Option<String>,
     pub audit: ChainOfEvidenceAudit,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scientific_release: Option<ScientificReleaseAssessment>,
     pub files: Vec<BundleFile>,
 }
 
@@ -64,9 +72,17 @@ impl InvestigationBundleExporter {
         options: BundleOptions,
     ) -> Result<BundleManifest> {
         validate_output_dir(output_dir)?;
+        if let Some(index) = state.verify_chain() {
+            return Err(anyhow!(
+                "refusing to export a broken transcript chain at retained index {index}"
+            ));
+        }
         prepare_output_dir(output_dir)?;
 
         let audit = state.investigation.audit(&state.claim_ledger);
+        let scientific_release = state
+            .investigation
+            .scientific_release_assessment(&state.claim_ledger);
         let state_bytes = serde_json::to_vec(state)?;
         if state_bytes.len() > MAX_STATE_BYTES {
             return Err(anyhow!(
@@ -129,7 +145,9 @@ impl InvestigationBundleExporter {
             transcript_chain_head: state.chain_head_hex(),
             state_sha256: sha256(&state_bytes),
             investigation_schema: state.investigation.schema.clone(),
+            report_schema: Some(REPORT_SCHEMA.into()),
             audit,
+            scientific_release: Some(scientific_release),
             files,
         };
         let manifest_bytes = serde_json::to_vec_pretty(&manifest)?;
@@ -252,6 +270,17 @@ impl InvestigationBundleExporter {
                             issues
                                 .push("evidence audit does not match the serialized state".into());
                         }
+                        if let Some(manifest_release) = &manifest.scientific_release
+                            && state
+                                .investigation
+                                .scientific_release_assessment(&state.claim_ledger)
+                                != *manifest_release
+                        {
+                            issues.push(
+                                "scientific release assessment does not match the serialized state"
+                                    .into(),
+                            );
+                        }
                         verify_json_projection(
                             output_dir,
                             "investigation.json",
@@ -275,13 +304,29 @@ impl InvestigationBundleExporter {
                             );
                         }
                         if expected.contains("report.md") {
-                            let expected_report = render_report(&state, &state_audit);
-                            match read_bounded(&output_dir.join("report.md"), MAX_STATE_BYTES) {
-                                Ok(report) if report == expected_report.as_bytes() => {}
-                                Ok(_) => issues
-                                    .push("report.md does not match the serialized state".into()),
-                                Err(error) => {
-                                    issues.push(format!("could not validate report.md: {error}"))
+                            match manifest.report_schema.as_deref() {
+                                Some(REPORT_SCHEMA) => {
+                                    let expected_report = render_report(&state, &state_audit);
+                                    match read_bounded(
+                                        &output_dir.join("report.md"),
+                                        MAX_STATE_BYTES,
+                                    ) {
+                                        Ok(report) if report == expected_report.as_bytes() => {}
+                                        Ok(_) => issues.push(
+                                            "report.md does not match its declared report schema"
+                                                .into(),
+                                        ),
+                                        Err(error) => issues
+                                            .push(format!("could not validate report.md: {error}")),
+                                    }
+                                }
+                                Some(schema) => {
+                                    issues.push(format!("unsupported report schema: {schema}"));
+                                }
+                                None => {
+                                    // Legacy bundles predate versioned report renderers. The
+                                    // manifest hash above remains the authoritative integrity
+                                    // check; all JSON projections are still recomputed.
                                 }
                             }
                         }
@@ -505,13 +550,27 @@ fn render_report(state: &ConversationState, audit: &ChainOfEvidenceAudit) -> Str
     report.push_str("# Crosstalk investigation report\n\n");
     report.push_str(&format!("- Session: `{}`\n", state.session_id));
     report.push_str(&format!(
-        "- Evidence-chain audit: **{}**\n",
+        "- Evidence integrity audit: **{}**\n",
         if audit.passed { "PASS" } else { "FAIL" }
     ));
     report.push_str(&format!(
         "- Verification coverage: {:.1}%\n",
         audit.verification_coverage * 100.0
     ));
+    let release = state
+        .investigation
+        .scientific_release_assessment(&state.claim_ledger);
+    report.push_str(&format!(
+        "- Scientific release: **{}**\n",
+        if release.eligible {
+            "ELIGIBLE"
+        } else {
+            "NOT ESTABLISHED"
+        }
+    ));
+    if let Some(warning) = release.unverified_warning() {
+        report.push_str(&format!("\n> **Warning:** {warning}\n"));
+    }
     report.push_str(&format!("- Claims: {}\n", audit.claim_count));
     report.push_str(&format!(
         "- Evidence artifacts: {}\n",

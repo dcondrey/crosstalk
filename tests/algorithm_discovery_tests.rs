@@ -115,6 +115,7 @@ fn challenge() -> AlgorithmChallenge {
             deterministic: true,
             independent_reproduction_required: true,
             reproduction_evaluator_id: Some("numeric-reproduction".into()),
+            distinct_attestation_keys_required: false,
         },
         primary_metric: "runtime_ms".into(),
         minimum_improvement: 1.0,

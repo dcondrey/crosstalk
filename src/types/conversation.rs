@@ -297,6 +297,42 @@ impl ConversationState {
         }
     }
 
+    /// Replace the most recently retained turn and rebuild the transcript hash
+    /// chain. Orchestration uses this when a provisional outcome is finalized
+    /// after external verification. Callers must provide a freshly signed turn.
+    pub fn replace_last_turn(&mut self, turn: Turn) -> Result<(), String> {
+        let Some(last) = self.turns.last_mut() else {
+            return Err("cannot replace a turn in an empty transcript".into());
+        };
+        if last.index != turn.index {
+            return Err(format!(
+                "replacement turn index {} does not match retained tail {}",
+                turn.index, last.index
+            ));
+        }
+        *last = turn;
+        self.rebuild_turn_hashes();
+        Ok(())
+    }
+
+    /// Recompute the derived transcript commitments after a trusted internal
+    /// finalization step. This is crate-visible so orchestration can close a
+    /// provisional turn transaction before persisting or exporting state.
+    pub(crate) fn rebuild_turn_hashes(&mut self) {
+        let mut rebuilt = Vec::with_capacity(self.turns.len());
+        for turn in &self.turns {
+            let mut hasher = sha2::Sha256::new();
+            if let Some(previous) = rebuilt.last() {
+                hasher.update(previous);
+            } else if let Some(base) = &self.turn_chain_base {
+                hasher.update(base);
+            }
+            hasher.update(turn_content_hash(turn));
+            rebuilt.push(hasher.finalize().to_vec());
+        }
+        self.turn_hashes = rebuilt;
+    }
+
     /// The current head of the turn hash chain (hex), suitable for anchoring in
     /// an external append-only log (e.g. a git commit message). Empty when no
     /// turns have been recorded.

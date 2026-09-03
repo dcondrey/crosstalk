@@ -88,6 +88,7 @@ fn write_fixture_files(
         deterministic: true,
         independent_reproduction_required: true,
         reproduction_evaluator_id: Some("wasm-i64-reproduction".into()),
+        distinct_attestation_keys_required: false,
     };
     let challenge_path = root.join("challenge.json");
     fs::write(
