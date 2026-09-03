@@ -82,7 +82,7 @@ The core crate deliberately cannot call a model provider or research API. Tests 
 
 The stage runs only when `--evolve-generations` is greater than zero. It starts from a seed derived from the user task, then uses the first available agent for variation and the second for adversarial evaluation. With one model, the same agent fills both roles.
 
-Calls within a generation are bounded by `--evolve-concurrency`. Completion order does not change retained-state ordering: results are processed by deterministic attempt index. Attempt failures are included in `GenerationReport`; they do not erase successful siblings. A stage-level timeout or evolution error is fail-open for availability, meaning Crosstalk logs the condition and proceeds to ordinary deliberation without evolved candidates.
+Calls within a generation are bounded by `--evolve-concurrency`. A finite call-slot budget is apportioned across the remaining requested generations, with unused slots carried forward, so an all-rejected early generation cannot starve every later generation. Completion order does not change retained-state ordering: results are processed by deterministic attempt index. Attempt failures are included in `GenerationReport`; when a draft exists, its title, structural text, and failure reason also enter bounded rejection memory so later generations can avoid it. A stage-level timeout or non-budget evolution error is fail-open for availability, meaning Crosstalk logs the condition and proceeds to ordinary deliberation without evolved candidates.
 
 Fail-open does not mean verified. An absent evolution artifact carries no positive capability signal, and orchestration must not present a timed-out generation as a successful discovery run.
 
@@ -101,6 +101,8 @@ Responses include retained idea IDs, complete parent IDs, mutation type, domain,
 
 The Rust reader supplies defaults for fields added compatibly to version 1, such as `max_concurrency`, so earlier v1 request fixtures continue to deserialize. A schema-breaking change requires a new version rather than silently reinterpreting stored state.
 
+The archive path added three such fields: `generation` and `tags` on `EvolvedIdea`, and `directive` on `EvolutionResponse`. All three are `#[serde(default)]`, so responses written before them still deserialize. `predicted_measurements` and `kill_criteria` also became defaulted, so an exporter whose source has no such column omits the keys entirely rather than emitting an empty list a reader could mistake for a measurement that found nothing.
+
 ### Phase 4 — Scientific and invention validation
 
 - Domain evaluator plugins for mathematics, cryptanalysis, linguistics, history, physics, chemistry, biology, CS, and AI.
@@ -112,11 +114,41 @@ The Rust reader supplies defaults for fields added compatibly to version 1, such
 
 ### Phase 5 — Python retirement
 
+- **Implemented:** `blindmind export-v1 <file> -p <project>` emits the `crosstalk.blindmind.v1` shape, one file per project because a checkpoint holds a single project.
+- **Implemented:** `crosstalk --import-blindmind <file>` reconstructs concepts and lineage into `EvolutionState` through the existing serde types, prints a `BlindmindImportSummary`, and writes the checkpoint with `--import-blindmind-out`. Dangling parent references are rejected per invariant 6.
 - Run fixed Python/Rust comparison suites across several historical BlindMind databases.
-- Export Python concepts and lineage through `crosstalk.blindmind.v1`.
-- Verify record counts, ancestry, scoring fixtures, and selection behavior.
+- Verify scoring fixtures and selection behavior. Record counts and ancestry are verified below; scoring is not, and cannot be from this data (see the fitness gap).
 - Make Rust the default after two releases of opt-in use.
 - Archive the Python engine only after migration tooling and rollback instructions are tested.
+
+#### What the export actually recovered
+
+Measured 2026-08-28 against `/Volumes/A/blindmind/data/blindmind.db` (194 concepts, 104 lineage rows). Exporter counts on the left, Rust reader counts on the right; every project was accepted.
+
+| project | concepts in | exported | restored | unexportable | valid edges | exported | reader edges | accepted |
+|---|---|---|---|---|---|---|---|---|
+| essays | 86 | 86 | 86 | 0 | 8 | 8 | 8 | yes |
+| conscious | 29 | 29 | 29 | 0 | 26 | 21 | 21 | yes |
+| riemann | 27 | 27 | 27 | 0 | 20 | 20 | 20 | yes |
+| embodied | 25 | 25 | 25 | 0 | 25 | 25 | 25 | yes |
+| asds | 14 | 14 | 14 | 0 | 14 | 14 | 14 | yes |
+| erdos | 9 | 9 | 9 | 0 | 5 | 5 | 5 | yes |
+| default | 4 | 4 | 4 | 0 | 0 | 0 | 0 | yes |
+| **total** | **194** | **194** | **194** | **0** | **98** | **93** | **93** | **7/7** |
+
+Nothing in the source is unexportable. Every v1 required field has a BlindMind source: `Concept.description` is carried as `mechanism`, which is a rename of the same field rather than a reconstruction, since `MutationOutput.description` is specified as "the concept and its mechanics". No title exceeds the 512-byte cap and the longest description is 18,337 bytes, well inside the 32,000-byte mechanism cap.
+
+Lineage reconciles against the 104 stored rows as 93 exported + 5 truncated + 4 with an endpoint outside the owning project + 2 whose endpoints are both absent from `concept` and which therefore appear in no project's export.
+
+#### What the export does not recover
+
+- **Fitness.** BlindMind records one composite scalar; `crosstalk.evolution.v1` has no slot for a scalar and requires seven axes. Every axis on an imported concept is therefore `0.0` and `next_directive` is empty, meaning *not measured*. Spreading one number across seven axes would assert seven judgements the critic never made, and `prior_art_overlap` runs in the opposite sense from the rest. The scalar survives only in the archive's `external_scores.blindmind_composite`. It was present on 69 of 194 concepts: essays 6/86, conscious 17/29, riemann 15/27, embodied 16/25, asds 10/14, erdos 5/9, default 0/4. The 125 without one are exactly the generation-0 seeds, which BlindMind never scored. **An imported checkpoint is an archive, not a resumable population**: with all-zero fitness it would select nothing.
+- **Predicted measurements and kill criteria.** Zero of 194. BlindMind has no column for either, so the exporter omits the keys rather than writing `[]`.
+- **Executable contracts and falsification probes.** None exist in Python, so imported configurations leave `require_executable_contract` and `require_falsification_probe` off.
+- **Five lineage edges**, all in `conscious`, whose recorded parent is not from a strictly earlier generation. `crosstalk.blindmind.v1` imposes no generation ordering, but a checkpoint lineage edge does, so the edge is dropped and the child is exported with truncated ancestry rather than being discarded. Eleven concepts across five projects (essays 1, conscious 4, riemann 3, embodied 2, erdos 1) reach the reader as non-seeds with no parents, five of them from this truncation and six because the source recorded no lineage row at all.
+- **The evolution directive** for four of seven projects. `EvolutionRun.latest_directive` exists only for `essays`, `riemann`, and `default`; the rest export an empty directive rather than an invented one.
+
+Phase 5 is not complete. The comparison suites have not run, Rust is not the default, and the two opt-in releases have not happened. The Python checkout stays in place.
 
 ## Evaluation gates
 
@@ -132,19 +164,22 @@ crosstalk --task "Invent a testable alternative to transformer attention" \
   --evolve-generations 3 \
   --evolve-population 8 \
   --evolve-concurrency 4 \
+  --evolve-constraint "the result must satisfy the exact recurrence" \
+  --evolve-exclusion "parity cancellation;linear surviving support" \
   --evolve-seed 42 \
   --evolve-timeout-secs 900 \
   --auto
 ```
 
-This runs native evolution first and attaches the retained frontier, the complete resumable checkpoint/lineage, and generation reports as `evolution/native-candidates.json`, `evolution/checkpoint.json`, and `evolution/generation-reports.json`. Crosstalk then sends those candidates through its normal adversarial deliberation and verification pipeline.
+This runs native evolution first and attaches the retained frontier, the complete resumable checkpoint/lineage, and generation reports as `evolution/native-candidates.json`, `evolution/checkpoint.json`, and `evolution/generation-reports.json`. Generated candidates must include an exact relation, composition rule, complexity argument, deterministic objective test, and an explicit distinction from every supplied exclusion. Structural fingerprints, rather than titles alone, suppress cosmetic variants. Crosstalk then sends the surviving proposals through its normal adversarial deliberation and verification pipeline.
 
 ## Known limitations
 
 - The overall timeout cancels by dropping the stage future; evolution is not yet attached to the orchestrator's shared `CancelScope`.
 - Model token and monetary costs are not yet returned through `PromptAgent`, so evolutionary budget enforcement is incomplete.
+- Startup endpoint-validation and fallback pings occur before the shared session budget is initialized; `--max-model-calls` therefore does not yet cap those preflight calls.
 - Variation and critic selection is positional, not routed by measured domain competence.
 - A checkpoint is emitted after the requested generations, not after every accepted candidate.
-- Title-token overlap is a weak duplicate and prior-art detector.
+- Structural token overlap is still only a deterministic duplicate heuristic, not a semantic equivalence proof or prior-art search.
 - Model fitness is predictive metadata. The checkpoint accepts typed objective updates, but the main evolution CLI does not yet schedule domain evaluators automatically.
 - The TUI does not yet expose an interactive lineage graph.

@@ -179,6 +179,19 @@ The commitment proves which cases an evaluator used and detects substitution aft
 
 The native BlindMind engine stores objective feedback separately from model-authored fitness, preserving the audit trail and checkpoint compatibility. `apply_objective_evaluation` and `apply_reproduction_outcome` update a serialized checkpoint.
 
+Long evolution stages publish a complete snapshot after every finished
+generation. The CLI emits generation progress and always writes
+`evolution/status.json`. If the overall stage times out, the latest completed
+candidate set, checkpoint, and generation reports are retained; an in-flight
+generation is cancelled and is not presented as completed work.
+
+An `ExecutableContract` can carry a typed `FalsificationProbe`: language,
+complete source, argument vector, a wall-clock ceiling of at most 300 seconds,
+and the machine-observable condition that rejects the candidate.  New requests
+require this artifact.  It is deliberately not executed by the evolution
+engine; execution belongs to a sandboxed objective evaluator, and until that
+happens the probe is only an unverified proposal.
+
 - An accepting result raises evidence and feasibility, with the highest evidence level reserved for an independent reproduction.
 - It never raises novelty: novelty still requires prior-art evidence.
 - A rejection lowers feasibility/evidence and adds a fatal flaw.
@@ -200,6 +213,8 @@ crosstalk \
 
 `--headless` requires `--task` and fails when no usable provider credential is configured. It does not fall into the interactive wizard. JSON or Markdown is written to stdout after the real orchestrator completes.
 
+Headless output reports two different decisions. The evidence integrity audit checks that hashes, links, and typed records are internally consistent. `scientific_release` is stricter: it remains `NOT ESTABLISHED` until at least one explicit fact or inference is evidence-linked and every such claim has an accepting objective verification. A clean audit with zero verification coverage is therefore no longer displayed as scientific success.
+
 The bundle exporter writes:
 
 | File | Contents |
@@ -216,6 +231,11 @@ The bundle exporter writes:
 Bundle paths are sanitized; filesystem root, symlink targets, and non-empty output directories are rejected. Requiring an empty directory prevents stale files from a previous run being mistaken for current evidence. The manifest is a tamper-evident commitment, not an external timestamp or third-party attestation.
 
 `InvestigationBundleExporter::verify` performs a non-executing replay of the integrity checks. It requires the exact declared file set, streams every file through SHA-256, validates sizes, deserializes `state.json`, recomputes its digest, verifies the retained transcript chain (including its truncation anchor), and recomputes the evidence audit. A party able to replace both files and the manifest can still create a new internally consistent bundle; publish or sign the manifest digest when an external authenticity guarantee is required.
+
+The exporter refuses a state whose transcript chain is already broken.  The
+CLI then reopens the completed bundle through this independent verifier before
+printing `integrity=PASS`.  Exact JSON float round-tripping is required because
+turn hashes commit to floating-point metadata as well as text and signatures.
 
 The same verifier is available as a standalone, provider-free command:
 

@@ -123,6 +123,8 @@ crosstalk \
   --evolve-generations 3 \
   --evolve-population 8 \
   --evolve-concurrency 4 \
+  --evolve-constraint "runtime must be o(n) in the requested output index" \
+  --evolve-exclusion "row-parity cancellation;Theta(n) surviving rows;no dyadic survival decay" \
   --evolve-seed 42 \
   --auto
 ```
@@ -163,7 +165,7 @@ crosstalk \
   --auto
 ```
 
-The command writes the final response to stdout. The bundle contains `manifest.json`, the complete `state.json`, `investigation.json`, `claims.json`, `audit.json`, `report.md`, the transcript, and content-addressed copies of session artifacts. The library verifier recomputes the file hashes, state digest, transcript chain, and evidence audit without executing artifacts.
+The command writes the final response to stdout. The bundle contains `manifest.json`, the complete `state.json`, `investigation.json`, `claims.json`, `audit.json`, `report.md`, the transcript, and content-addressed copies of session artifacts. The library verifier recomputes the file hashes, state digest, transcript chain, and evidence audit without executing artifacts. Export refuses an internally broken transcript, uses exact JSON float round-tripping for hash stability, and reopens the completed bundle through the full verifier before reporting `integrity=PASS`.
 
 Verify a bundle offline without configuring or contacting a model provider:
 
@@ -245,7 +247,10 @@ The `crosstalk-evolution` workspace crate ports BlindMind's algorithmic core to 
 - crossover, point mutation, inversion, and wildcard generation;
 - independent variation and critic agents when at least two models are available;
 - bounded parallel evaluation with per-attempt failure isolation;
-- hard validation gates, rejection memory, and Pareto-front retention;
+- executable contracts for exact relations and composition rules, plus typed,
+  bounded falsification-probe source artifacts (language, argv, timeout, and
+  rejection signal);
+- typed structural exclusions, structural duplicate rejection, a bounded critic-backed elimination ledger, and Pareto-front retention;
 - complete lineage, generation reports, and versioned JSON checkpoints.
 
 An evolution run adds these artifacts to session state:
@@ -254,9 +259,22 @@ An evolution run adds these artifacts to session state:
 evolution/native-candidates.json
 evolution/checkpoint.json
 evolution/generation-reports.json
+evolution/status.json
 ```
 
-Evolution scores are model judgments, not proof of novelty or feasibility. The retained frontier must pass downstream prior-art, proof, simulation, prototype, or experiment gates. Objective results can now be committed back into an evolution checkpoint: reproduced passes raise evidence and feasibility without altering novelty; failures lower both, create a fatal flaw, and remove candidates that violate hard constraints. See the [BlindMind Rust Migration Plan](docs/blindmind-rust-migration.md).
+The status artifact records `completed`, `failed`, or `timed_out` together with
+generation and call-slot counts. A snapshot is published after each completed
+generation, so an overall evolution timeout retains the latest candidates,
+checkpoint, and reports instead of dropping all earlier work. Headless runs
+also print generation-level progress as those snapshots are created.
+
+Evolution scores are model judgments, not proof of novelty or feasibility. New CLI runs require a candidate to state an executable contract, and every `--evolve-exclusion` must be addressed by ID before admission. These are proposal-quality gates, not objective verification. The retained frontier must still pass downstream prior-art, proof, simulation, prototype, or experiment gates. Objective results can be committed back into an evolution checkpoint: reproduced passes raise evidence and feasibility without altering novelty; failures lower both, create a fatal flaw, and remove candidates that violate hard constraints. See the [BlindMind Rust Migration Plan](docs/blindmind-rust-migration.md).
+
+New requests also require complete falsification-probe source instead of a
+promise to implement a test later.  Evolution treats that source as untrusted
+data: it validates size and timeout bounds and preserves an argument vector,
+but does not execute it.  A sandboxed objective evaluator must run and attest
+the probe before it can affect scientific status.
 
 ## Trust boundaries
 
@@ -292,6 +310,10 @@ Crosstalk provides process integrity and verification adapters; it does not turn
 | `--evolve-seed <N>` | Deterministic evolution seed; default `1` |
 | `--evolve-concurrency <N>` | Maximum concurrent candidate evaluations; default `4` |
 | `--evolve-timeout-secs <N>` | Overall evolution-stage timeout; default `900` |
+| `--evolve-max-model-calls <N>` | Hard variation/critic call-slot cap; `0` derives a cap from population and generations |
+| `--evolve-constraint <TEXT>` | Hard candidate requirement; repeat for multiple constraints |
+| `--evolve-exclusion <FEATURES>` | Eliminated structural family; use semicolons between features and repeat as needed |
+| `--max-model-calls <N>` | Post-initialization evolution/orchestration provider-call cap; endpoint-validation pings are not yet charged |
 | `--headless` | Disable the terminal UI and write the final structured result to stdout; requires `--task` |
 | `--headless-format <FORMAT>` | Headless output as `json` or `markdown`; default `json` |
 | `--bundle-dir <DIR>` | Export a reproducible investigation bundle after the run |
