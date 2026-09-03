@@ -111,6 +111,7 @@ impl McpGateway {
     /// and returns the first text content block from the response.
     /// To wire a real remote worker pool, replace the `UnixStream::connect` call with
     /// pool selection (round-robin or random) against registered worker endpoints.
+    #[cfg(unix)]
     pub async fn remote_sampling(prompt: &str, model_id: &str) -> Result<String> {
         use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
         use tokio::net::UnixStream;
@@ -248,6 +249,14 @@ impl McpGateway {
         }
 
         Err(last_err.unwrap_or_else(|| anyhow::anyhow!("MCP sampling failed after 3 attempts")))
+    }
+
+    /// Report the unavailable Unix-socket transport on non-Unix platforms.
+    #[cfg(not(unix))]
+    pub async fn remote_sampling(_prompt: &str, _model_id: &str) -> Result<String> {
+        Err(anyhow::anyhow!(
+            "MCP remote sampling requires the Unix-socket transport, which is unavailable on this platform"
+        ))
     }
 
     /// High-level dispatch by method name (used by tests and internal routing).

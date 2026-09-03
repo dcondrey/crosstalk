@@ -1,4 +1,9 @@
-# Crosstalk documentation
+<img src="../assets/icon.png" alt="Crosstalk" width="88" align="left">
+
+<h1>Crosstalk documentation</h1>
+<p><strong>Architecture, verification, research, evaluation, and contributor guides for Crosstalk.</strong></p>
+
+<br clear="left">
 
 Start with the document that matches the question you are trying to answer.
 
