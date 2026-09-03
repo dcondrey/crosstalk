@@ -84,6 +84,17 @@ pub struct LiveRunConfig {
     pub reasoning_model: String,
 }
 
+/// Complete accounting for a live run. Infrastructure failures are counted
+/// even though they do not have a normal [`SweBenchResult`] payload.
+#[derive(Debug)]
+pub struct LiveRunOutcome {
+    pub results: Vec<SweBenchResult>,
+    pub total_tasks: usize,
+    pub completed_tasks: usize,
+    pub infrastructure_failures: usize,
+    pub cancelled: bool,
+}
+
 impl Default for LiveRunConfig {
     fn default() -> Self {
         Self {
@@ -108,6 +119,7 @@ struct RunState {
     completed: AtomicU64,
     resolved: AtomicU64,
     failed: AtomicU64,
+    infrastructure_failed: AtomicU64,
     /// Cost stored as integer microdollars (USD × 10⁶) for lock-free atomics.
     cost_ucu: AtomicU64,
     total: usize,
@@ -123,6 +135,7 @@ impl RunState {
             completed: AtomicU64::new(0),
             resolved: AtomicU64::new(0),
             failed: AtomicU64::new(0),
+            infrastructure_failed: AtomicU64::new(0),
             cost_ucu: AtomicU64::new(0),
             total,
             start: Instant::now(),
@@ -184,7 +197,7 @@ impl RunState {
 pub async fn run_live(
     instances: &[SweBenchInstance],
     config: LiveRunConfig,
-) -> Result<Vec<SweBenchResult>> {
+) -> Result<LiveRunOutcome> {
     let (instances_to_run, concurrency) = match &config.mode {
         RunMode::SmokeTest { count } => (&instances[..instances.len().min(*count)], 1),
         RunMode::FullRun { concurrency } => (instances, *concurrency),
@@ -272,7 +285,12 @@ pub async fn run_live(
         match handle.await {
             Ok(Some(r)) => results.push(r),
             Ok(None) => {} // instance skipped (image missing, container error)
-            Err(e) => tracing::error!("Task panicked: {e}"),
+            Err(e) => {
+                tracing::error!("Task panicked: {e}");
+                state.failed.fetch_add(1, Ordering::Relaxed);
+                state.infrastructure_failed.fetch_add(1, Ordering::Relaxed);
+                state.completed.fetch_add(1, Ordering::Relaxed);
+            }
         }
     }
 
@@ -285,7 +303,13 @@ pub async fn run_live(
         config.checkpoint_path.display()
     );
 
-    Ok(results)
+    Ok(LiveRunOutcome {
+        results,
+        total_tasks: total,
+        completed_tasks: state.completed.load(Ordering::Relaxed) as usize,
+        infrastructure_failures: state.infrastructure_failed.load(Ordering::Relaxed) as usize,
+        cancelled: state.cancelled.load(Ordering::Relaxed),
+    })
 }
 
 // ─── Per-instance execution ───────────────────────────────────────────────────
@@ -366,6 +390,7 @@ async fn run_one(
         Err(e) => {
             tracing::error!(instance = %inst.instance_id, "run_instance error: {e:#}");
             state.failed.fetch_add(1, Ordering::Relaxed);
+            state.infrastructure_failed.fetch_add(1, Ordering::Relaxed);
             state.completed.fetch_add(1, Ordering::Relaxed);
             state.log_progress();
             None

@@ -2,14 +2,21 @@ mod claude_agent;
 mod dataset;
 mod docker_env;
 mod harness;
+mod manifest;
 mod report;
 mod runner;
 mod scenarios;
 mod swe_bench_runner;
 
-use anyhow::Result;
+use anyhow::{Context, Result, bail};
 use clap::Parser;
 use std::path::PathBuf;
+use std::time::{SystemTime, UNIX_EPOCH};
+
+use manifest::{
+    EVALUATION_RESULT_SCHEMA, EvaluationArtifact, EvaluationManifest, EvaluationResultManifest,
+    RunClassification, RunStatus, file_sha256,
+};
 
 /// Load `~/.env` (KEY=value lines) into the process environment so that
 /// clap's `env` attributes pick them up. Existing env vars are not overwritten.
@@ -42,6 +49,18 @@ fn load_dotenv() {
     about = "Fail-closed benchmarking harness for Crosstalk"
 )]
 struct Args {
+    /// Preregistered JSON manifest for a live, smoke, or development evaluation.
+    #[arg(long)]
+    evaluation_manifest: Option<PathBuf>,
+
+    /// Validate --evaluation-manifest, print its identity, and exit without running models.
+    #[arg(long, requires = "evaluation_manifest")]
+    validate_manifest: bool,
+
+    /// Create-only path for the hash-bound live evaluation artifact.
+    #[arg(long)]
+    evaluation_result: Option<PathBuf>,
+
     /// Run the simulated UCB1 topology scenarios with synthetic fixtures.
     #[arg(long, default_value_t = false)]
     synthetic: bool,
@@ -150,6 +169,28 @@ async fn main() -> Result<()> {
 
     let args = Args::parse();
 
+    let evaluation_manifest = args
+        .evaluation_manifest
+        .as_deref()
+        .map(EvaluationManifest::load)
+        .transpose()?;
+
+    if args.validate_manifest {
+        let manifest = evaluation_manifest
+            .as_ref()
+            .expect("clap requires --evaluation-manifest");
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "schema": manifest.schema,
+                "id": manifest.id,
+                "classification": manifest.classification,
+                "sha256": manifest.sha256()?,
+            }))?
+        );
+        return Ok(());
+    }
+
     let (api_key, api_base) = args.effective_agent();
 
     if (args.live_run || args.smoke_test || args.swe_bench.is_some())
@@ -166,6 +207,11 @@ async fn main() -> Result<()> {
             anyhow::anyhow!("--swe-bench is required with --live-run / --smoke-test")
         })?;
         let instances = swe_bench_runner::load_swe_bench(swe_path)?;
+        let manifest = evaluation_manifest.as_ref().ok_or_else(|| {
+            anyhow::anyhow!("--evaluation-manifest is required for every live or smoke evaluation")
+        })?;
+        validate_live_manifest(manifest, &args, swe_path, &api_base)?;
+        let started_at = unix_timestamp()?;
         let mode = if args.smoke_test {
             runner::RunMode::SmokeTest { count: args.count }
         } else {
@@ -193,8 +239,58 @@ async fn main() -> Result<()> {
             fallback_anthropic_key,
             reasoning_model: args.reasoning_model.clone(),
         };
-        let results = runner::run_live(&instances, cfg).await?;
-        runner::print_live_summary(&results);
+        let outcome = runner::run_live(&instances, cfg).await?;
+        runner::print_live_summary(&outcome.results);
+        let completed_at = unix_timestamp()?;
+        let successful_tasks = outcome
+            .results
+            .iter()
+            .filter(|result| result.metrics.patch_resolved)
+            .count();
+        let actual_cost_usd = outcome
+            .results
+            .iter()
+            .map(|result| result.metrics.total_cost_usd)
+            .sum();
+        let status = if outcome.cancelled {
+            RunStatus::Cancelled
+        } else {
+            RunStatus::Completed
+        };
+        let diagnostics = if outcome.infrastructure_failures == 0 {
+            String::new()
+        } else {
+            format!(
+                "{} task(s) ended in infrastructure failure and are counted as failures",
+                outcome.infrastructure_failures
+            )
+        };
+        let result = EvaluationResultManifest {
+            schema: EVALUATION_RESULT_SCHEMA.into(),
+            manifest_id: manifest.id.clone(),
+            manifest_sha256: manifest.sha256()?,
+            classification: manifest.classification,
+            started_at,
+            completed_at,
+            status,
+            total_tasks: outcome.total_tasks,
+            completed_tasks: outcome.completed_tasks,
+            successful_tasks,
+            failed_tasks: outcome.completed_tasks.saturating_sub(successful_tasks),
+            actual_cost_usd,
+            result_payload_sha256: String::new(),
+            diagnostics,
+        };
+        let artifact = EvaluationArtifact::new(result, serde_json::to_value(&outcome.results)?)?;
+        let result_path = args.evaluation_result.clone().unwrap_or_else(|| {
+            args.output.join(format!(
+                "{}-{}-result.json",
+                sanitize_filename(&manifest.id),
+                completed_at
+            ))
+        });
+        artifact.write_create_new(&result_path)?;
+        println!("Evaluation artifact: {}", result_path.display());
         return Ok(());
     }
 
@@ -202,6 +298,15 @@ async fn main() -> Result<()> {
         anyhow::bail!(
             "non-live SWE-bench uses a simulated repository environment; pass --mock to acknowledge this development mode, or use --live-run"
         );
+    }
+
+    if let Some(manifest) = &evaluation_manifest {
+        if manifest.classification != RunClassification::DevelopmentSimulation {
+            bail!("synthetic and mock evaluations require classification=development_simulation");
+        }
+        if manifest.seed != args.seed {
+            bail!("evaluation seed does not match the preregistered manifest");
+        }
     }
 
     if !args.synthetic && args.swe_bench.is_none() {
@@ -269,4 +374,88 @@ async fn main() -> Result<()> {
     }
 
     Ok(())
+}
+
+fn validate_live_manifest(
+    manifest: &EvaluationManifest,
+    args: &Args,
+    task_set_path: &std::path::Path,
+    api_base: &Option<String>,
+) -> Result<()> {
+    let expected_classification = if args.mock {
+        RunClassification::DevelopmentSimulation
+    } else if args.smoke_test {
+        RunClassification::SmokeTest
+    } else {
+        RunClassification::Benchmark
+    };
+    if manifest.classification != expected_classification {
+        bail!(
+            "evaluation classification mismatch: command requires {:?}",
+            expected_classification
+        );
+    }
+    let actual_task_sha = file_sha256(task_set_path)?;
+    if manifest.task_set.content_sha256.to_ascii_lowercase() != actual_task_sha {
+        bail!("SWE-bench task-set bytes do not match the preregistered commitment");
+    }
+    if manifest.seed != args.seed {
+        bail!("evaluation seed does not match the preregistered manifest");
+    }
+    let effective_concurrency = if args.smoke_test { 1 } else { args.concurrency };
+    if args.swe_max_turns > manifest.budget.max_turns_per_task
+        || effective_concurrency > manifest.budget.max_concurrency
+    {
+        bail!("requested turns or concurrency exceed the preregistered budget");
+    }
+    let provider = if api_base.is_some() {
+        "openrouter"
+    } else {
+        "anthropic"
+    };
+    let solver = manifest
+        .models
+        .iter()
+        .find(|model| model.role == "solver")
+        .ok_or_else(|| anyhow::anyhow!("evaluation manifest requires a solver model role"))?;
+    if solver.provider != provider || solver.model_id != args.model {
+        bail!("effective solver provider/model does not match the preregistered manifest");
+    }
+    if !args.reasoning_model.is_empty() {
+        let reasoning = manifest
+            .models
+            .iter()
+            .find(|model| model.role == "reasoning")
+            .ok_or_else(|| anyhow::anyhow!("manifest requires a reasoning model role"))?;
+        if reasoning.provider != provider || reasoning.model_id != args.reasoning_model {
+            bail!("effective reasoning provider/model does not match the manifest");
+        }
+    }
+    Ok(())
+}
+
+fn unix_timestamp() -> Result<u64> {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .context("system clock is before Unix epoch")
+        .map(|duration| duration.as_secs())
+}
+
+fn sanitize_filename(value: &str) -> String {
+    let sanitized: String = value
+        .chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() || matches!(character, '-' | '_' | '.') {
+                character
+            } else {
+                '_'
+            }
+        })
+        .take(160)
+        .collect();
+    if sanitized.is_empty() {
+        "evaluation".into()
+    } else {
+        sanitized
+    }
 }
