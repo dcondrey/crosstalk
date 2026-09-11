@@ -80,6 +80,7 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) +
 
 ### Documentation
 - Update changelog [skip ci]
+- Update changelog [skip ci]
 - Restore CI and OpenSSF badges
 - Fix README header rendering and badge accuracy
 - Update changelog [skip ci]
@@ -101,6 +102,7 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) +
 - Rewrite README and add writerslogic conventions (badges, community-health, dotfiles); set copyright to WritersLogic, Inc.
 
 ### Fixed
+- Drop the redundant Ok/? in the non-unix create_secret_file
 - Clear clippy findings blocking CI
 - Pin Rust toolchain for Lance compatibility
 - Resolve Windows data directory
