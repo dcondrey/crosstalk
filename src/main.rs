@@ -441,9 +441,8 @@ async fn main() -> anyhow::Result<()> {
 
     if let Some(archive) = &args.import_blindmind {
         let json = std::fs::read_to_string(archive)?;
-        let (state, summary) =
-            crosstalk::engines::idea_evolution::import_blindmind_archive(&json)
-                .map_err(anyhow::Error::msg)?;
+        let (state, summary) = crosstalk::engines::idea_evolution::import_blindmind_archive(&json)
+            .map_err(anyhow::Error::msg)?;
         if let Some(out) = &args.import_blindmind_out {
             std::fs::write(out, state.checkpoint_json()?)?;
         }
