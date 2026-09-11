@@ -251,7 +251,7 @@ fn read_regular_bounded(path: &Path, max_bytes: u64, label: &str) -> Result<Vec<
 #[cfg(unix)]
 fn create_secret_file(path: &Path) -> Result<fs::File> {
     use std::os::unix::fs::OpenOptionsExt;
-    Ok(OpenOptions::new()
+    OpenOptions::new()
         .write(true)
         .create_new(true)
         .mode(0o600)
@@ -261,7 +261,7 @@ fn create_secret_file(path: &Path) -> Result<fs::File> {
                 "could not create worker key {} (existing files are not overwritten)",
                 path.display()
             )
-        })?)
+        })
 }
 
 #[cfg(not(unix))]

@@ -748,6 +748,19 @@ fn build_native_outcome(
     })
 }
 
+const fn default_evolution_concurrency() -> usize {
+    4
+}
+
+fn parse_json_object<T: serde::de::DeserializeOwned>(text: &str) -> Result<T, String> {
+    let start = text
+        .find('{')
+        .ok_or_else(|| "model response contained no JSON object".to_string())?;
+    let end = text
+        .rfind('}')
+        .ok_or_else(|| "model response contained an incomplete JSON object".to_string())?;
+    serde_json::from_str(&text[start..=end]).map_err(|error| format!("invalid model JSON: {error}"))
+}
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -957,18 +970,4 @@ mod tests {
         let first_checkpoint = EvolutionState::restore_json(&completed[0].checkpoint_json).unwrap();
         assert_eq!(first_checkpoint.config.max_model_call_slots, 4);
     }
-}
-
-const fn default_evolution_concurrency() -> usize {
-    4
-}
-
-fn parse_json_object<T: serde::de::DeserializeOwned>(text: &str) -> Result<T, String> {
-    let start = text
-        .find('{')
-        .ok_or_else(|| "model response contained no JSON object".to_string())?;
-    let end = text
-        .rfind('}')
-        .ok_or_else(|| "model response contained an incomplete JSON object".to_string())?;
-    serde_json::from_str(&text[start..=end]).map_err(|error| format!("invalid model JSON: {error}"))
 }
