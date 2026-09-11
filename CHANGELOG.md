@@ -79,6 +79,7 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) +
 - Reorganize into modular architecture (core, engines, types, mcp, ui, utils)
 
 ### Documentation
+- Update changelog [skip ci]
 - Restore CI and OpenSSF badges
 - Fix README header rendering and badge accuracy
 - Update changelog [skip ci]
