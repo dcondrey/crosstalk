@@ -1,16 +1,9 @@
-<img src="./assets/icon.png" alt="Crosstalk" width="120" align="left">
-
-<h1>Crosstalk</h1>
-<p><strong>A domain-general, multi-model reasoning system for debate, proof, research, invention, and verified implementation.</strong></p>
-
-<br clear="left">
+<h3 align="center">Crosstalk</h3>
+<p align="center"><strong>A domain-general, multi-model reasoning system for debate, proof, research, invention, and verified implementation.</strong></p>
 
 <!-- Badge palette: dynamic health; metadata #007ec6; standards #6a4c93; label #20232a; platform brand colors. -->
 
 <p align="center">
-  <a href="https://github.com/dcondrey/crosstalk/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/dcondrey/crosstalk/ci.yml?branch=main&amp;style=flat-square&amp;label=CI&amp;labelColor=20232a" alt="CI"></a>
-  <a href="https://scorecard.dev/viewer/?uri=github.com/dcondrey/crosstalk"><img src="https://img.shields.io/ossf-scorecard/github.com/dcondrey/crosstalk?style=flat-square&amp;labelColor=20232a" alt="OpenSSF Scorecard"></a>
-  <a href="https://www.bestpractices.dev/projects/14403"><img src="https://www.bestpractices.dev/projects/14403/badge" alt="OpenSSF Best Practices"></a>
   <a href="./src/mcp/"><img src="https://badge.mcpx.dev?type=server&amp;features=resources,tools,prompts,sampling" alt="MCP server: resources, tools, prompts, and sampling"></a>
   <a href="https://www.rust-lang.org"><img src="https://img.shields.io/badge/Rust-1.91%2B-007ec6?style=flat-square&amp;labelColor=20232a&amp;logo=rust&amp;logoColor=white" alt="Rust 1.91+"></a>
   <a href="./LICENSE"><img src="https://img.shields.io/badge/license-Apache--2.0-007ec6?style=flat-square&amp;labelColor=20232a" alt="Apache-2.0 license"></a>
@@ -18,6 +11,8 @@
   <a href="https://orcid.org/0009-0003-1849-2963"><img src="https://img.shields.io/badge/ORCID-0009--0003--1849--2963-A6CE39?style=flat-square&amp;labelColor=20232a&amp;logo=orcid&amp;logoColor=white" alt="ORCID 0009-0003-1849-2963"></a>
   <a href="https://github.com/sponsors/dcondrey"><img src="https://img.shields.io/badge/sponsor-dcondrey-EA4AAA?style=flat-square&amp;labelColor=20232a&amp;logo=githubsponsors&amp;logoColor=white" alt="Sponsor dcondrey"></a>
 </p>
+
+---
 
 Crosstalk coordinates several language models under an explicit reasoning protocol. It asks them to develop independent approaches, expose assumptions, attack each other's pivotal claims, use domain-appropriate evidence, and synthesize a result that preserves uncertainty instead of hiding it behind consensus.
 
