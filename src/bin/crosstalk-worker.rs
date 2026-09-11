@@ -266,7 +266,7 @@ fn create_secret_file(path: &Path) -> Result<fs::File> {
 
 #[cfg(not(unix))]
 fn create_secret_file(path: &Path) -> Result<fs::File> {
-    Ok(OpenOptions::new()
+    OpenOptions::new()
         .write(true)
         .create_new(true)
         .open(path)
@@ -275,7 +275,7 @@ fn create_secret_file(path: &Path) -> Result<fs::File> {
                 "could not create worker key {} (existing files are not overwritten)",
                 path.display()
             )
-        })?)
+        })
 }
 
 #[cfg(unix)]
