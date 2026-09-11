@@ -4,7 +4,7 @@ use crate::types::memory::{
     DeletionLogEntry, Lesson, MemoryRecord, MemoryStoreStats, SnapshotBundle, SnapshotMetadata,
 };
 use anyhow::{Context, Result, anyhow};
-use arrow_array::{RecordBatch, RecordBatchIterator, StringArray, UInt32Array, cast::AsArray};
+use arrow_array::{RecordBatch, StringArray, UInt32Array, cast::AsArray};
 use arrow_schema::{DataType, Field, Schema};
 use futures::StreamExt;
 use lancedb::{
@@ -628,8 +628,7 @@ impl MemoryStore {
                         false,
                     ),
                 ]));
-                let batches = RecordBatchIterator::new(vec![].into_iter().map(Ok), schema);
-                conn.create_table(name, Box::new(batches))
+                conn.create_empty_table(name, schema)
                     .execute()
                     .await
                     .map_err(|e| anyhow!(e))
@@ -654,13 +653,7 @@ impl MemoryStore {
         builder.append(true);
         let vectors = Arc::new(builder.finish());
         let batch = RecordBatch::try_new(schema, vec![turn_ids, session_ids, contents, vectors])?;
-        table
-            .add(Box::new(RecordBatchIterator::new(
-                vec![Ok(batch)],
-                table.schema().await?,
-            )))
-            .execute()
-            .await?;
+        table.add(batch).execute().await?;
         Ok(())
     }
 

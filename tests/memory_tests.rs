@@ -1524,3 +1524,31 @@ async fn push_record_shares_one_allocation_across_both_indexes() {
         "the bridge and store indexes must reference a single shared record allocation"
     );
 }
+
+#[tokio::test]
+async fn memory_store_store_round_trips_through_lancedb() {
+    // Covers MemoryStore::store, which writes straight to LanceDB without
+    // touching the in-memory session cache. stats() falls back to the DB when
+    // that cache is empty, so a non-zero count here proves the row was really
+    // committed rather than merely accepted by the builder.
+    let dir = tempfile::tempdir().unwrap();
+    let mut store = MemoryStore::new_with_dim(dir.path().to_str().unwrap(), 8);
+    store.init().await.unwrap();
+
+    store
+        .store(MemoryRecord {
+            turn_id: 7,
+            session_id: "session-round-trip".to_string(),
+            embedding: vec![0.5; 8],
+            content_hash: "hash-round-trip".to_string(),
+            timestamp: 1_700_000_000,
+            metadata_json: "{}".to_string(),
+            outcome: None,
+            is_negative: false,
+        })
+        .await
+        .unwrap();
+
+    let stats = store.stats().await.unwrap();
+    assert_eq!(stats.total_records, 1);
+}
