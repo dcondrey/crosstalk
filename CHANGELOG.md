@@ -81,6 +81,7 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) +
 ### Documentation
 - Update changelog [skip ci]
 - Update changelog [skip ci]
+- Update changelog [skip ci]
 - Restore CI and OpenSSF badges
 - Fix README header rendering and badge accuracy
 - Update changelog [skip ci]
