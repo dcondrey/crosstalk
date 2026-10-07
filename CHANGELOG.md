@@ -79,6 +79,8 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) +
 - Reorganize into modular architecture (core, engines, types, mcp, ui, utils)
 
 ### Documentation
+- Standardize README header (#28)
+- Update changelog [skip ci]
 - Update changelog [skip ci]
 - Update changelog [skip ci]
 - Update changelog [skip ci]
