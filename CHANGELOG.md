@@ -80,6 +80,7 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) +
 
 ### Documentation
 - Update changelog [skip ci]
+- Update changelog [skip ci]
 - Standardize README header (#28)
 - Update changelog [skip ci]
 - Update changelog [skip ci]
